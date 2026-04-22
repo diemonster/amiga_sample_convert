@@ -9,20 +9,38 @@
 #   ./amiga_sample_convert.sh [options] input_file [output_file]
 #
 # Options:
-#   -r RATE    Target sample rate in Hz (default: 16726)
+#   -r RATE    Target sample rate in Hz (default: 22050)
 #              Common Amiga rates:
 #                8363  - ProTracker C-3 standard (low quality, saves memory)
 #                11025 - Telephony standard
-#                16726 - 2x ProTracker C-3 (good balance, default)
-#                22050 - CD/2 (high quality, more memory)
+#                16726 - 2x ProTracker C-3 (conservative, smaller files)
+#                22050 - CD/2 (high quality, good default)
 #                27928 - 4x ProTracker C-3 (near max safe rate for PAL)
+#              Note: Paula is fixed 8-bit; rate is the primary quality lever.
+#              MiSTer Minimig can be configured with 2MB chip RAM, so higher
+#              rates are usually worth it for any percussive or tonal material.
 #   -n         Normalize audio to 0 dBFS before conversion
 #   -g GAIN    Apply gain in dB before conversion (e.g., -3, +6)
 #   -f FREQ    Manual anti-alias LPF cutoff in Hz (default: auto Nyquist-based)
-#   -l         Apply light Amiga-style low-pass at 3.3 kHz (emulates A500 output)
+#   -l         Apply Amiga-style low-pass at 4.9 kHz (emulates A500 always-on
+#              output filter, 6 dB/oct). Use -f 3300 for the switchable
+#              "LED filter" instead. Skip this if your MiSTer Minimig core
+#              already has A500 filtering enabled (double-filtering sounds bad).
 #   -t         Trim silence from start and end (threshold: -48 dB)
 #   -d         Use TPDF dither when reducing to 8-bit (default: on)
 #   -D         Disable dither (truncate to 8-bit)
+#   -P SEMI    Pre-pitch sample UP by SEMI semitones before conversion.
+#              In OctaMED, play SEMI semitones LOWER than normal to restore
+#              original pitch. This forces Paula to play samples at a lower
+#              rate, reducing Nyquist and allowing HF content to fold back
+#              as aliasing — the classic crunchy Amiga jungle/breakcore sound.
+#              Examples:
+#                -P 12  → pitch up 1 octave, play at C-2 (was C-3)
+#                -P 24  → pitch up 2 octaves, play at C-1 (was C-3)
+#                -P 7   → pitch up a fifth, play 7 semis lower
+#              Auto-disables anti-alias LPF (-l, -f) since aliasing is the goal.
+#              Note: doubles/quadruples source sample memory usage since we
+#              resample up before conversion. Fine on MiSTer with 2MB chip RAM.
 #   -p         Preview: print file info and conversion plan, don't convert
 #   -b         Batch mode: treat all non-option args as input files
 #   -o DIR     Output directory for batch mode (default: ./amiga_samples)
@@ -42,13 +60,14 @@ set -euo pipefail
 
 # ─── defaults ───────────────────────────────────────────────────────────────
 
-SAMPLE_RATE=16726
+SAMPLE_RATE=22050
 NORMALIZE=false
 GAIN=""
 LPF_CUTOFF=""
 AMIGA_LPF=false
 TRIM_SILENCE=false
 DITHER=true
+PREPITCH_SEMITONES=0
 PREVIEW=false
 BATCH=false
 OUT_DIR="./amiga_samples"
@@ -73,12 +92,30 @@ die()  { echo -e "${RED}Error:${RESET} $*" >&2; exit 1; }
 warn() { echo -e "${YELLOW}Warning:${RESET} $*" >&2; }
 info() { echo -e "${CYAN}→${RESET} $*"; }
 
+# Convert semitones to a human-readable target note relative to C-3
+semitones_to_playback_hint() {
+    local semis=$1
+    # OctaMED note naming: C-1, C#1, D-1, ..., C-2, ..., C-5
+    local notes=("C-" "C#" "D-" "D#" "E-" "F-" "F#" "G-" "G#" "A-" "A#" "B-")
+    # C-3 is reference. Going DOWN by $semis semitones from C-3.
+    # Semitone number of C-3 in semitones from C-0: 3*12 = 36
+    local c3_abs=36
+    local target_abs=$((c3_abs - semis))
+    if (( target_abs < 0 )); then
+        echo "below playable range"
+        return
+    fi
+    local octave=$((target_abs / 12))
+    local note_idx=$((target_abs % 12))
+    echo "${notes[$note_idx]}${octave}"
+}
+
 usage() {
-    sed -n '/^# Usage:/,/^[^#]/{ /^#/s/^# \?//p }' "$0"
+    sed -nE '/^# Usage:/,/^# Options:/{ /^# Options:/!s/^# ?//p; }' "$0"
     echo ""
-    sed -n '/^# Options:/,/^[^#]/{ /^#/s/^# \?//p }' "$0"
+    sed -nE '/^# Options:/,/^# OctaMED/{ /^# OctaMED/!s/^# ?//p; }' "$0"
     echo ""
-    sed -n '/^# OctaMED 4 notes:/,/^[^#]/{ /^#/s/^# \?//p }' "$0"
+    sed -nE '/^# OctaMED 4 notes:/,/^[^#]/{ /^#/s/^# ?//p; }' "$0"
     exit 0
 }
 
@@ -184,8 +221,14 @@ print_info() {
         echo -e "  Normalize: ${NORMALIZE}"
         [[ -n "$GAIN" ]] && echo -e "  Gain: ${GAIN} dB"
         [[ -n "$LPF_CUTOFF" ]] && echo -e "  LPF cutoff: ${LPF_CUTOFF} Hz"
-        ${AMIGA_LPF} && echo -e "  A500-style LPF: yes (3.3 kHz)"
+        ${AMIGA_LPF} && echo -e "  A500-style LPF: yes (4.9 kHz always-on filter)"
         ${TRIM_SILENCE} && echo -e "  Trim silence: yes"
+        if (( PREPITCH_SEMITONES != 0 )); then
+            local hint
+            hint=$(semitones_to_playback_hint "$PREPITCH_SEMITONES")
+            echo -e "  ${YELLOW}Pre-pitch: +${PREPITCH_SEMITONES} semitones (play at ${hint} in OctaMED to restore pitch)${RESET}"
+            echo -e "  ${YELLOW}Anti-alias LPF: disabled (aliasing is the goal)${RESET}"
+        fi
 
         # chip RAM context
         if (( est_bytes > 512000 )); then
@@ -211,11 +254,12 @@ convert_file() {
     # build sox effects chain
     local effects=()
 
-    # remix to mono (mix all channels equally)
+    # downmix to mono by averaging (preserves loudness, unlike `remix -`
+    # which sums channels and can clip correlated stereo material)
     local src_chans
     src_chans=$(soxi -c "$input" 2>/dev/null) || die "Cannot read input file: $input"
     if (( src_chans > 1 )); then
-        effects+=(remix -)
+        effects+=(channels 1)
     fi
 
     # trim silence
@@ -230,6 +274,23 @@ convert_file() {
         effects+=(gain "$GAIN")
     fi
 
+    # 1 dB headroom before resampling. Normalized or near-full-scale material
+    # produces inter-sample peaks during sinc interpolation; trimming 1 dB
+    # here prevents sox's internal rate stage from clipping, and also leaves
+    # room so the final 8-bit truncation (±127) doesn't hard-clip either.
+    effects+=(gain -1)
+
+    # Pre-pitch shift (for intentional aliasing on playback).
+    # `pitch` (in cents) changes pitch without changing duration, which is
+    # what we want: shorten the perceived period, keep the sample's length
+    # so it still loops/plays as expected. Semitones × 100 = cents.
+    # Must happen BEFORE rate conversion so the pitched-up content is what
+    # gets Nyquist-folded at the target rate.
+    if (( PREPITCH_SEMITONES != 0 )); then
+        local cents=$((PREPITCH_SEMITONES * 100))
+        effects+=(pitch "$cents")
+    fi
+
     # resample to target rate with very-high-quality sinc interpolation
     local src_rate
     src_rate=$(soxi -r "$input" 2>/dev/null)
@@ -237,30 +298,38 @@ convert_file() {
         effects+=(rate -v "$SAMPLE_RATE")
     fi
 
-    # optional Amiga-style low-pass (emulates the A500 output filter)
-    if ${AMIGA_LPF}; then
-        effects+=(lowpass 3300)
+    # optional Amiga-style low-pass (A500 always-on filter, ~4.9 kHz, 6 dB/oct)
+    # For the switchable "LED filter" effect, pass -f 3300 instead.
+    # Auto-disabled when pre-pitching, since aliasing is the creative goal.
+    if ${AMIGA_LPF} && (( PREPITCH_SEMITONES == 0 )); then
+        effects+=(lowpass 4900)
     fi
 
-    # manual LPF override
-    if [[ -n "$LPF_CUTOFF" ]]; then
+    # manual LPF override — also skipped during pre-pitch
+    if [[ -n "$LPF_CUTOFF" ]] && (( PREPITCH_SEMITONES == 0 )); then
         effects+=(lowpass "$LPF_CUTOFF")
     fi
 
-    # dither
+    # dither (TPDF — better suited than noise-shaped dither for 8-bit,
+    # where we don't have enough resolution to carry HF shaped noise cleanly)
     if ${DITHER}; then
-        effects+=(dither -s)
+        effects+=(dither)
     fi
 
     info "Converting: $(basename "$input")"
     info "  → ${SAMPLE_RATE} Hz, 8-bit signed mono"
+    if (( PREPITCH_SEMITONES != 0 )); then
+        local hint
+        hint=$(semitones_to_playback_hint "$PREPITCH_SEMITONES")
+        info "  → pre-pitched +${PREPITCH_SEMITONES} semis; play at ${hint} in OctaMED"
+    fi
 
-    # run sox: output as raw signed 8-bit
+    # run sox: output as raw signed 8-bit.
+    # Rate and channels are handled by the effects chain, not the output
+    # format spec, so intent is unambiguous and sox doesn't double-convert.
     sox "$input" \
         --encoding signed-integer \
         --bits 8 \
-        --channels 1 \
-        --rate "$SAMPLE_RATE" \
         --type raw \
         "$raw_out" \
         ${effects[@]+"${effects[@]}"}
@@ -300,6 +369,7 @@ main() {
             -t) TRIM_SILENCE=true; shift ;;
             -d) DITHER=true; shift ;;
             -D) DITHER=false; shift ;;
+            -P) PREPITCH_SEMITONES="$2"; shift 2 ;;
             -p) PREVIEW=true; shift ;;
             -b) BATCH=true; shift ;;
             -o) OUT_DIR="$2"; shift 2 ;;
@@ -317,6 +387,24 @@ main() {
     # validate sample rate range
     if (( SAMPLE_RATE < 2000 || SAMPLE_RATE > 28867 )); then
         warn "Sample rate ${SAMPLE_RATE} Hz is outside typical Amiga range (2000-28867 Hz)"
+    fi
+
+    # validate pre-pitch value — sanity-check extreme values
+    if (( PREPITCH_SEMITONES < -60 || PREPITCH_SEMITONES > 60 )); then
+        warn "Pre-pitch ${PREPITCH_SEMITONES} semitones is extreme (>5 octaves). Typical useful range: 7 to 24."
+    fi
+    if (( PREPITCH_SEMITONES < 0 )); then
+        warn "Negative pre-pitch: this will force HIGHER playback notes in OctaMED to restore pitch. Unusual but not blocked."
+    fi
+
+    # warn when user passes LPF flags that will be silently disabled
+    if (( PREPITCH_SEMITONES != 0 )); then
+        if ${AMIGA_LPF}; then
+            warn "Pre-pitch active: -l Amiga LPF disabled (would defeat aliasing)"
+        fi
+        if [[ -n "$LPF_CUTOFF" ]]; then
+            warn "Pre-pitch active: -f manual LPF (${LPF_CUTOFF} Hz) disabled (would defeat aliasing)"
+        fi
     fi
 
     # single file mode
@@ -338,6 +426,12 @@ main() {
             base="${base%.*}"
             # Amiga filenames: keep it short, no spaces
             base=$(echo "$base" | tr ' ' '_' | cut -c1-24)
+            # Tag aliased output so you don't confuse it with clean version
+            if (( PREPITCH_SEMITONES != 0 )); then
+                base="${base}_P${PREPITCH_SEMITONES}"
+                # Re-truncate in case the tag pushed it over 24 chars
+                base=$(echo "$base" | cut -c1-24)
+            fi
             explicit_output="${base}.iff"
         fi
 
@@ -367,6 +461,10 @@ main() {
         base=$(basename "$input")
         base="${base%.*}"
         base=$(echo "$base" | tr ' ' '_' | cut -c1-24)
+        if (( PREPITCH_SEMITONES != 0 )); then
+            base="${base}_P${PREPITCH_SEMITONES}"
+            base=$(echo "$base" | cut -c1-24)
+        fi
         local output="${OUT_DIR}/${base}.iff"
 
         # avoid overwrites in batch
@@ -448,6 +546,21 @@ PYEOF
         echo "$1" | python3 -c "import sys,json; print(json.load(sys.stdin)['$2'])"
     }
 
+    # Reset all config to known defaults. Used between tests so a leftover
+    # env var from a previous test doesn't silently influence the next one.
+    _reset_opts() {
+        SAMPLE_RATE=16726
+        NORMALIZE=false
+        GAIN=""
+        LPF_CUTOFF=""
+        AMIGA_LPF=false
+        TRIM_SILENCE=false
+        DITHER=false
+        PREPITCH_SEMITONES=0
+        PREVIEW=false
+        BATCH=false
+    }
+
     echo -e "${BOLD}Running self-tests...${RESET}"
     echo ""
 
@@ -455,10 +568,9 @@ PYEOF
 
     echo -e "${BOLD}Test 1: Basic stereo WAV → IFF 8SVX${RESET}"
 
+    _reset_opts
     sox -n -r 44100 -b 16 -c 2 "${tmpdir}/t1_in.wav" synth 0.05 sine 440
-    SAMPLE_RATE=16726 NORMALIZE=false GAIN="" LPF_CUTOFF="" AMIGA_LPF=false \
-        TRIM_SILENCE=false DITHER=false PREVIEW=false \
-        convert_file "${tmpdir}/t1_in.wav" "${tmpdir}/t1_out.iff"
+    convert_file "${tmpdir}/t1_in.wav" "${tmpdir}/t1_out.iff"
 
     local iff
     iff=$(_read_iff "${tmpdir}/t1_out.iff")
@@ -503,10 +615,10 @@ PYEOF
     echo -e "${BOLD}Test 2: Sample rate accuracy${RESET}"
 
     for rate in 8363 16726 22050; do
+        _reset_opts
+        SAMPLE_RATE=$rate
         sox -n -r 48000 -b 24 -c 1 "${tmpdir}/t2_in.wav" synth 0.1 sine 1000
-        SAMPLE_RATE=$rate NORMALIZE=false GAIN="" LPF_CUTOFF="" AMIGA_LPF=false \
-            TRIM_SILENCE=false DITHER=false PREVIEW=false \
-            convert_file "${tmpdir}/t2_in.wav" "${tmpdir}/t2_out.iff"
+        convert_file "${tmpdir}/t2_in.wav" "${tmpdir}/t2_out.iff"
 
         iff=$(_read_iff "${tmpdir}/t2_out.iff")
         local got_rate
@@ -541,14 +653,13 @@ PYEOF
     sox -n -r 44100 -b 16 -c 1 "${tmpdir}/t3_in.wav" synth 0.05 sine 440 gain -40
 
     # without normalize
-    SAMPLE_RATE=16726 NORMALIZE=false GAIN="" LPF_CUTOFF="" AMIGA_LPF=false \
-        TRIM_SILENCE=false DITHER=false PREVIEW=false \
-        convert_file "${tmpdir}/t3_in.wav" "${tmpdir}/t3_quiet.iff"
+    _reset_opts
+    convert_file "${tmpdir}/t3_in.wav" "${tmpdir}/t3_quiet.iff"
 
     # with normalize
-    SAMPLE_RATE=16726 NORMALIZE=true GAIN="" LPF_CUTOFF="" AMIGA_LPF=false \
-        TRIM_SILENCE=false DITHER=false PREVIEW=false \
-        convert_file "${tmpdir}/t3_in.wav" "${tmpdir}/t3_norm.iff"
+    _reset_opts
+    NORMALIZE=true
+    convert_file "${tmpdir}/t3_in.wav" "${tmpdir}/t3_norm.iff"
 
     local quiet_peak norm_peak
     quiet_peak=$(_iff_field "$(_read_iff "${tmpdir}/t3_quiet.iff")" peak)
@@ -560,10 +671,18 @@ PYEOF
         _fail "Normalize didn't boost signal ($norm_peak vs $quiet_peak)"
     fi
 
+    # With 1 dB of safety headroom before dither, normalized peak should land
+    # around 113 (127 × 10^(-1/20) ≈ 113), not pinned at 127.
     if (( norm_peak > 100 )); then
         _pass "Normalized signal uses most of 8-bit range (peak=$norm_peak/127)"
     else
         _fail "Normalized signal still quiet (peak=$norm_peak/127)"
+    fi
+
+    if (( norm_peak <= 127 )); then
+        _pass "Normalized signal has headroom (peak=$norm_peak ≤ 127)"
+    else
+        _fail "Normalized signal clipped (peak=$norm_peak > 127)"
     fi
 
     echo ""
@@ -616,9 +735,10 @@ PYEOF
 
     sox -n -r 192000 -b 32 -e floating-point -c 1 "${tmpdir}/t5_in.wav" synth 0.02 sine 440
 
-    SAMPLE_RATE=8363 NORMALIZE=true GAIN="" LPF_CUTOFF="" AMIGA_LPF=false \
-        TRIM_SILENCE=false DITHER=false PREVIEW=false \
-        convert_file "${tmpdir}/t5_in.wav" "${tmpdir}/t5_out.iff"
+    _reset_opts
+    SAMPLE_RATE=8363
+    NORMALIZE=true
+    convert_file "${tmpdir}/t5_in.wav" "${tmpdir}/t5_out.iff"
 
     iff=$(_read_iff "${tmpdir}/t5_out.iff")
     [[ $(_iff_field "$iff" form_tag) == "FORM" ]] && _pass "192kHz/32-float → valid FORM" || _fail "192kHz input failed"
@@ -633,9 +753,8 @@ PYEOF
     # generate 0.5s of silence — should produce near-zero samples
     sox -n -r 16726 -b 16 -c 1 "${tmpdir}/t6_in.wav" synth 0.01 sine 0
 
-    SAMPLE_RATE=16726 NORMALIZE=false GAIN="" LPF_CUTOFF="" AMIGA_LPF=false \
-        TRIM_SILENCE=false DITHER=false PREVIEW=false \
-        convert_file "${tmpdir}/t6_in.wav" "${tmpdir}/t6_out.iff"
+    _reset_opts
+    convert_file "${tmpdir}/t6_in.wav" "${tmpdir}/t6_out.iff"
 
     iff=$(_read_iff "${tmpdir}/t6_out.iff")
     local peak
@@ -656,28 +775,167 @@ PYEOF
     local longname="this is a very long sample name with spaces and stuff"
     cp "${tmpdir}/t6_in.wav" "${tmpdir}/${longname}.wav"
 
-    SAMPLE_RATE=16726 NORMALIZE=false GAIN="" LPF_CUTOFF="" AMIGA_LPF=false \
-        TRIM_SILENCE=false DITHER=false PREVIEW=false BATCH=true \
-        OUT_DIR="${tmpdir}/sanitized"
-
+    _reset_opts
     mkdir -p "${tmpdir}/sanitized"
     convert_file "${tmpdir}/${longname}.wav" "${tmpdir}/sanitized/this_is_a_very_long_sampl.iff"
 
-    # we just check conversion succeeded — the main script handles naming,
-    # but here we directly test that the IFF is valid regardless
     if [[ -f "${tmpdir}/sanitized/this_is_a_very_long_sampl.iff" ]]; then
         iff=$(_read_iff "${tmpdir}/sanitized/this_is_a_very_long_sampl.iff")
         [[ $(_iff_field "$iff" form_tag) == "FORM" ]] && _pass "Long filename → valid output" || _fail "Long filename output corrupt"
     else
-        # convert_file writes to the path we give it, so just check what we got
-        local found
-        found=$(ls "${tmpdir}/sanitized/"*.iff 2>/dev/null | head -1)
-        if [[ -n "$found" ]]; then
-            _pass "Long filename → output created ($(basename "$found"))"
-        else
-            _fail "Long filename → no output created"
-        fi
+        _fail "Long filename → no output created"
     fi
+
+    echo ""
+
+    # ── Test 8: Headroom prevents clipping of loud source ──────────────────
+
+    echo -e "${BOLD}Test 8: Headroom prevents clipping${RESET}"
+
+    # Full-scale sine minus 0.1 dB. Represents realistic "hot" source
+    # material — sample packs often ship near 0 dBFS. (Square waves are
+    # pathological due to Gibbs ringing during resampling and aren't a
+    # useful test of real conversion behavior.)
+    sox -n -r 44100 -b 16 -c 1 "${tmpdir}/t8_in.wav" synth 0.05 sine 1000 gain -0.1
+
+    _reset_opts
+    convert_file "${tmpdir}/t8_in.wav" "${tmpdir}/t8_out.iff"
+
+    iff=$(_read_iff "${tmpdir}/t8_out.iff")
+    peak=$(_iff_field "$iff" peak)
+    # Signed 8-bit range is -128..+127, so abs() max is 128.
+    # With -1 dB headroom we expect peak ≈ 113 (well inside range).
+    if (( peak <= 128 )); then
+        _pass "Loud source within 8-bit range (peak=$peak, max 128)"
+    else
+        _fail "Loud source exceeded 8-bit range (peak=$peak)"
+    fi
+
+    if (( peak >= 100 && peak <= 120 )); then
+        _pass "Headroom in expected range (peak=$peak, target ~113)"
+    else
+        _fail "Headroom unexpected (peak=$peak, expected 100-120)"
+    fi
+
+    echo ""
+
+    # ── Test 9: Pre-pitch shift produces valid output ──────────────────────
+
+    echo -e "${BOLD}Test 9: Pre-pitch shift (-P flag)${RESET}"
+
+    # Generate a 1 kHz sine. After +12 semitones, it should be ~2 kHz.
+    sox -n -r 44100 -b 16 -c 1 "${tmpdir}/t9_in.wav" synth 0.1 sine 1000
+
+    _reset_opts
+    SAMPLE_RATE=22050
+    PREPITCH_SEMITONES=12
+    convert_file "${tmpdir}/t9_in.wav" "${tmpdir}/t9_octave.iff"
+
+    iff=$(_read_iff "${tmpdir}/t9_octave.iff")
+    [[ $(_iff_field "$iff" form_tag) == "FORM" ]] && _pass "Pre-pitched +12 → valid FORM" || _fail "Pre-pitched output corrupt"
+    [[ $(_iff_field "$iff" sample_rate) == "22050" ]] && _pass "Stored rate preserved (22050)" || _fail "Rate changed unexpectedly"
+
+    # The body duration in samples at the OUTPUT rate should be unchanged —
+    # `pitch` preserves duration. 0.1s × 22050 = 2205 samples ±10%.
+    body_size=$(_iff_field "$iff" body_size)
+    if (( body_size >= 1985 && body_size <= 2425 )); then
+        _pass "Duration preserved after pitch shift (got $body_size samples)"
+    else
+        _fail "Duration wrong after pitch shift ($body_size, expected ~2205)"
+    fi
+
+    echo ""
+
+    # ── Test 10: Pre-pitch auto-disables LPF ───────────────────────────────
+
+    echo -e "${BOLD}Test 10: Pre-pitch auto-disables anti-alias LPF${RESET}"
+
+    # White noise has energy across the full spectrum. With LPF it would be
+    # dulled; without, HF content folds back as aliasing.
+    sox -n -r 44100 -b 16 -c 1 "${tmpdir}/t10_in.wav" synth 0.1 whitenoise
+
+    # Convert once with LPF flags but NO pre-pitch (LPF should apply)
+    _reset_opts
+    SAMPLE_RATE=22050
+    AMIGA_LPF=true
+    LPF_CUTOFF=3000
+    convert_file "${tmpdir}/t10_in.wav" "${tmpdir}/t10_lpf.iff" 2>/dev/null
+
+    # Convert with both LPF flags AND pre-pitch (LPF should be bypassed)
+    _reset_opts
+    SAMPLE_RATE=22050
+    AMIGA_LPF=true
+    LPF_CUTOFF=3000
+    PREPITCH_SEMITONES=12
+    convert_file "${tmpdir}/t10_in.wav" "${tmpdir}/t10_aliased.iff" 2>/dev/null
+
+    # Both files should exist and be valid IFF.
+    local iff_lpf iff_alias
+    iff_lpf=$(_read_iff "${tmpdir}/t10_lpf.iff")
+    iff_alias=$(_read_iff "${tmpdir}/t10_aliased.iff")
+
+    [[ $(_iff_field "$iff_lpf" form_tag) == "FORM" ]] && _pass "LPF-only output valid" || _fail "LPF-only output corrupt"
+    [[ $(_iff_field "$iff_alias" form_tag) == "FORM" ]] && _pass "Pre-pitched output valid" || _fail "Pre-pitched output corrupt"
+
+    # Check HF content via sample-to-sample variance. A heavily LPF'd signal
+    # should have lower average absolute delta between adjacent samples than
+    # one that still has HF content / aliasing. We compute mean |Δ| for each
+    # file and assert aliased > lpf.
+    local delta_lpf delta_alias
+    delta_lpf=$(python3 - "${tmpdir}/t10_lpf.iff" << 'PYEOF'
+import struct
+data = open(__import__('sys').argv[1],'rb').read()
+body_off = 48
+body_size = struct.unpack(">I", data[44:48])[0]
+body = data[body_off:body_off+body_size]
+signed = [b if b < 128 else b - 256 for b in body]
+if len(signed) < 2:
+    print(0)
+else:
+    deltas = [abs(signed[i+1] - signed[i]) for i in range(len(signed)-1)]
+    print(sum(deltas) / len(deltas))
+PYEOF
+)
+    delta_alias=$(python3 - "${tmpdir}/t10_aliased.iff" << 'PYEOF'
+import struct
+data = open(__import__('sys').argv[1],'rb').read()
+body_off = 48
+body_size = struct.unpack(">I", data[44:48])[0]
+body = data[body_off:body_off+body_size]
+signed = [b if b < 128 else b - 256 for b in body]
+if len(signed) < 2:
+    print(0)
+else:
+    deltas = [abs(signed[i+1] - signed[i]) for i in range(len(signed)-1)]
+    print(sum(deltas) / len(deltas))
+PYEOF
+)
+
+    # Compare as floats in python (bash can't float-compare natively)
+    if python3 -c "import sys; sys.exit(0 if $delta_alias > $delta_lpf else 1)"; then
+        _pass "Pre-pitched output has more HF content than LPF'd (Δ: $delta_alias > $delta_lpf)"
+    else
+        _fail "Pre-pitched output not brighter than LPF'd (Δ: $delta_alias vs $delta_lpf) — LPF may not be bypassed"
+    fi
+
+    echo ""
+
+    # ── Test 11: semitones_to_playback_hint calculation ────────────────────
+
+    echo -e "${BOLD}Test 11: Playback hint calculation${RESET}"
+
+    local hint
+    hint=$(semitones_to_playback_hint 12)
+    [[ "$hint" == "C-2" ]] && _pass "+12 semis → C-2 (was C-3)" || _fail "+12 semis → expected C-2, got $hint"
+
+    hint=$(semitones_to_playback_hint 24)
+    [[ "$hint" == "C-1" ]] && _pass "+24 semis → C-1 (was C-3)" || _fail "+24 semis → expected C-1, got $hint"
+
+    hint=$(semitones_to_playback_hint 7)
+    [[ "$hint" == "F-2" ]] && _pass "+7 semis → F-2 (perfect fifth down)" || _fail "+7 semis → expected F-2, got $hint"
+
+    hint=$(semitones_to_playback_hint 0)
+    [[ "$hint" == "C-3" ]] && _pass "0 semis → C-3 (unchanged)" || _fail "0 semis → expected C-3, got $hint"
 
     echo ""
 
