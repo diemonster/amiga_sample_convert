@@ -39,8 +39,25 @@
 #                -P 24  → pitch up 2 octaves, play at C-1 (was C-3)
 #                -P 7   → pitch up a fifth, play 7 semis lower
 #              Auto-disables anti-alias LPF (-l, -f) since aliasing is the goal.
-#              Note: doubles/quadruples source sample memory usage since we
-#              resample up before conversion. Fine on MiSTer with 2MB chip RAM.
+#              Uses sox's `speed` effect (raw resample, like tape speed-up):
+#              +12 semis halves the sample's duration. The pitch cancels out
+#              when you play it back at a lower note in OctaMED, but Paula's
+#              nearest-neighbor playback math generates the aliasing on the
+#              way. This matches authentic Amiga/sampler workflow — we avoid
+#              sox's `pitch` effect because its phase vocoder adds audible
+#              cyclic window artifacts that aren't musically useful here.
+#   -V SEMI    Vocoder-pitch shift (duration-preserving phase vocoder).
+#              Like -P but uses sox's `pitch` effect, which preserves sample
+#              duration at the cost of cyclic window-crossfade artifacts.
+#              That glitchy, warbly, "time-stretched" texture is itself a
+#              distinctive sound — useful for IDM, breakcore pads, and
+#              vaporwave-adjacent textures. Play the sample at its original
+#              note in OctaMED (no pitch compensation needed).
+#              Examples:
+#                -V 12  → pitched up 1 octave, plays at C-3 still, warbly
+#                -V -5  → pitched down 5 semis, duration unchanged
+#              Auto-disables anti-alias LPF like -P does.
+#              Mutually exclusive with -P.
 #   -p         Preview: print file info and conversion plan, don't convert
 #   -b         Batch mode: treat all non-option args as input files
 #   -o DIR     Output directory for batch mode (default: ./amiga_samples)
@@ -68,6 +85,7 @@ AMIGA_LPF=false
 TRIM_SILENCE=false
 DITHER=true
 PREPITCH_SEMITONES=0
+VOCODER_SEMITONES=0
 PREVIEW=false
 BATCH=false
 OUT_DIR="./amiga_samples"
@@ -229,6 +247,12 @@ print_info() {
             echo -e "  ${YELLOW}Pre-pitch: +${PREPITCH_SEMITONES} semitones (play at ${hint} in OctaMED to restore pitch)${RESET}"
             echo -e "  ${YELLOW}Anti-alias LPF: disabled (aliasing is the goal)${RESET}"
         fi
+        if (( VOCODER_SEMITONES != 0 )); then
+            local sign=""
+            (( VOCODER_SEMITONES > 0 )) && sign="+"
+            echo -e "  ${YELLOW}Vocoder pitch: ${sign}${VOCODER_SEMITONES} semitones (duration preserved, warbly artifacts)${RESET}"
+            echo -e "  ${YELLOW}Anti-alias LPF: disabled${RESET}"
+        fi
 
         # chip RAM context
         if (( est_bytes > 512000 )); then
@@ -281,13 +305,30 @@ convert_file() {
     effects+=(gain -1)
 
     # Pre-pitch shift (for intentional aliasing on playback).
-    # `pitch` (in cents) changes pitch without changing duration, which is
-    # what we want: shorten the perceived period, keep the sample's length
-    # so it still loops/plays as expected. Semitones × 100 = cents.
-    # Must happen BEFORE rate conversion so the pitched-up content is what
-    # gets Nyquist-folded at the target rate.
+    # `speed` resamples the audio straight — pitch up = duration down.
+    # This is the authentic Amiga workflow: pitch-shift by resampling at
+    # the source, then let Paula do its zero-interpolation nearest-neighbor
+    # resampling on playback. The aliasing/crunch comes from Paula's
+    # playback math, not from any time-stretching artifacts.
+    #
+    # We explicitly do NOT use sox's `pitch` effect — that uses a phase
+    # vocoder that creates audible cyclic window-crossfade artifacts,
+    # which defeat the authentic sound we're going for.
+    #
+    # speed factor = 2^(semitones/12), e.g. +12 semis = 2.0x
+    # Must happen BEFORE the rate conversion stage.
     if (( PREPITCH_SEMITONES != 0 )); then
-        local cents=$((PREPITCH_SEMITONES * 100))
+        local speed_factor
+        speed_factor=$(python3 -c "print(2 ** ($PREPITCH_SEMITONES / 12.0))")
+        effects+=(speed "$speed_factor")
+    fi
+
+    # Vocoder-style pitch shift (for glitchy, warbly texture).
+    # Uses sox's `pitch` effect which IS a phase vocoder — preserves
+    # duration at the cost of cyclic window artifacts. Those artifacts
+    # are the feature, not a bug. Argument is in cents (semitones × 100).
+    if (( VOCODER_SEMITONES != 0 )); then
+        local cents=$((VOCODER_SEMITONES * 100))
         effects+=(pitch "$cents")
     fi
 
@@ -300,13 +341,14 @@ convert_file() {
 
     # optional Amiga-style low-pass (A500 always-on filter, ~4.9 kHz, 6 dB/oct)
     # For the switchable "LED filter" effect, pass -f 3300 instead.
-    # Auto-disabled when pre-pitching, since aliasing is the creative goal.
-    if ${AMIGA_LPF} && (( PREPITCH_SEMITONES == 0 )); then
+    # Auto-disabled when pre-pitching or vocoder-pitching, since the pitch
+    # effects are creative and LPF would defeat them.
+    if ${AMIGA_LPF} && (( PREPITCH_SEMITONES == 0 )) && (( VOCODER_SEMITONES == 0 )); then
         effects+=(lowpass 4900)
     fi
 
-    # manual LPF override — also skipped during pre-pitch
-    if [[ -n "$LPF_CUTOFF" ]] && (( PREPITCH_SEMITONES == 0 )); then
+    # manual LPF override — also skipped during pitch effects
+    if [[ -n "$LPF_CUTOFF" ]] && (( PREPITCH_SEMITONES == 0 )) && (( VOCODER_SEMITONES == 0 )); then
         effects+=(lowpass "$LPF_CUTOFF")
     fi
 
@@ -322,6 +364,11 @@ convert_file() {
         local hint
         hint=$(semitones_to_playback_hint "$PREPITCH_SEMITONES")
         info "  → pre-pitched +${PREPITCH_SEMITONES} semis; play at ${hint} in OctaMED"
+    fi
+    if (( VOCODER_SEMITONES != 0 )); then
+        local sign=""
+        (( VOCODER_SEMITONES > 0 )) && sign="+"
+        info "  → vocoder-pitched ${sign}${VOCODER_SEMITONES} semis (duration preserved); play at C-3"
     fi
 
     # run sox: output as raw signed 8-bit.
@@ -370,6 +417,7 @@ main() {
             -d) DITHER=true; shift ;;
             -D) DITHER=false; shift ;;
             -P) PREPITCH_SEMITONES="$2"; shift 2 ;;
+            -V) VOCODER_SEMITONES="$2"; shift 2 ;;
             -p) PREVIEW=true; shift ;;
             -b) BATCH=true; shift ;;
             -o) OUT_DIR="$2"; shift 2 ;;
@@ -397,13 +445,25 @@ main() {
         warn "Negative pre-pitch: this will force HIGHER playback notes in OctaMED to restore pitch. Unusual but not blocked."
     fi
 
+    # validate vocoder value
+    if (( VOCODER_SEMITONES < -60 || VOCODER_SEMITONES > 60 )); then
+        warn "Vocoder pitch ${VOCODER_SEMITONES} semitones is extreme (>5 octaves). Expect heavy artifacts."
+    fi
+
+    # -P and -V are mutually exclusive
+    if (( PREPITCH_SEMITONES != 0 )) && (( VOCODER_SEMITONES != 0 )); then
+        die "-P and -V cannot be used together. Pick one pitch-shift method."
+    fi
+
     # warn when user passes LPF flags that will be silently disabled
-    if (( PREPITCH_SEMITONES != 0 )); then
+    if (( PREPITCH_SEMITONES != 0 )) || (( VOCODER_SEMITONES != 0 )); then
+        local pitch_mode="pre-pitch"
+        (( VOCODER_SEMITONES != 0 )) && pitch_mode="vocoder"
         if ${AMIGA_LPF}; then
-            warn "Pre-pitch active: -l Amiga LPF disabled (would defeat aliasing)"
+            warn "${pitch_mode^} active: -l Amiga LPF disabled (would defeat the effect)"
         fi
         if [[ -n "$LPF_CUTOFF" ]]; then
-            warn "Pre-pitch active: -f manual LPF (${LPF_CUTOFF} Hz) disabled (would defeat aliasing)"
+            warn "${pitch_mode^} active: -f manual LPF (${LPF_CUTOFF} Hz) disabled (would defeat the effect)"
         fi
     fi
 
@@ -426,10 +486,13 @@ main() {
             base="${base%.*}"
             # Amiga filenames: keep it short, no spaces
             base=$(echo "$base" | tr ' ' '_' | cut -c1-24)
-            # Tag aliased output so you don't confuse it with clean version
+            # Tag aliased/vocoder output so you don't confuse it with clean version
             if (( PREPITCH_SEMITONES != 0 )); then
                 base="${base}_P${PREPITCH_SEMITONES}"
                 # Re-truncate in case the tag pushed it over 24 chars
+                base=$(echo "$base" | cut -c1-24)
+            elif (( VOCODER_SEMITONES != 0 )); then
+                base="${base}_V${VOCODER_SEMITONES}"
                 base=$(echo "$base" | cut -c1-24)
             fi
             explicit_output="${base}.iff"
@@ -463,6 +526,9 @@ main() {
         base=$(echo "$base" | tr ' ' '_' | cut -c1-24)
         if (( PREPITCH_SEMITONES != 0 )); then
             base="${base}_P${PREPITCH_SEMITONES}"
+            base=$(echo "$base" | cut -c1-24)
+        elif (( VOCODER_SEMITONES != 0 )); then
+            base="${base}_V${VOCODER_SEMITONES}"
             base=$(echo "$base" | cut -c1-24)
         fi
         local output="${OUT_DIR}/${base}.iff"
@@ -557,6 +623,7 @@ PYEOF
         TRIM_SILENCE=false
         DITHER=false
         PREPITCH_SEMITONES=0
+        VOCODER_SEMITONES=0
         PREVIEW=false
         BATCH=false
     }
@@ -823,7 +890,8 @@ PYEOF
 
     echo -e "${BOLD}Test 9: Pre-pitch shift (-P flag)${RESET}"
 
-    # Generate a 1 kHz sine. After +12 semitones, it should be ~2 kHz.
+    # Generate a 1 kHz sine. After +12 semitones via `speed`, duration
+    # should be halved (2x speed) AND pitch should be doubled to 2 kHz.
     sox -n -r 44100 -b 16 -c 1 "${tmpdir}/t9_in.wav" synth 0.1 sine 1000
 
     _reset_opts
@@ -835,13 +903,28 @@ PYEOF
     [[ $(_iff_field "$iff" form_tag) == "FORM" ]] && _pass "Pre-pitched +12 → valid FORM" || _fail "Pre-pitched output corrupt"
     [[ $(_iff_field "$iff" sample_rate) == "22050" ]] && _pass "Stored rate preserved (22050)" || _fail "Rate changed unexpectedly"
 
-    # The body duration in samples at the OUTPUT rate should be unchanged —
-    # `pitch` preserves duration. 0.1s × 22050 = 2205 samples ±10%.
+    # With `speed` (not `pitch`), +12 semis = 2x speed, so 0.1s source
+    # becomes 0.05s. At 22050 Hz that's ~1102 samples ±10%.
     body_size=$(_iff_field "$iff" body_size)
-    if (( body_size >= 1985 && body_size <= 2425 )); then
-        _pass "Duration preserved after pitch shift (got $body_size samples)"
+    if (( body_size >= 990 && body_size <= 1215 )); then
+        _pass "Duration halved by 2x speed (got $body_size samples, expected ~1102)"
     else
-        _fail "Duration wrong after pitch shift ($body_size, expected ~2205)"
+        _fail "Duration unexpected after speed shift ($body_size, expected ~1102)"
+    fi
+
+    # Also verify a non-octave value: +7 semis (perfect fifth) = ~1.498x speed.
+    # 0.1s → ~0.0667s → ~1471 samples at 22050 Hz ±10%.
+    _reset_opts
+    SAMPLE_RATE=22050
+    PREPITCH_SEMITONES=7
+    convert_file "${tmpdir}/t9_in.wav" "${tmpdir}/t9_fifth.iff"
+
+    iff=$(_read_iff "${tmpdir}/t9_fifth.iff")
+    body_size=$(_iff_field "$iff" body_size)
+    if (( body_size >= 1324 && body_size <= 1618 )); then
+        _pass "+7 semis produces ~1.498x speed ($body_size samples, expected ~1471)"
+    else
+        _fail "+7 semis duration unexpected ($body_size, expected ~1471)"
     fi
 
     echo ""
@@ -936,6 +1019,66 @@ PYEOF
 
     hint=$(semitones_to_playback_hint 0)
     [[ "$hint" == "C-3" ]] && _pass "0 semis → C-3 (unchanged)" || _fail "0 semis → expected C-3, got $hint"
+
+    echo ""
+
+    # ── Test 12: Vocoder-pitch shift preserves duration ────────────────────
+
+    echo -e "${BOLD}Test 12: Vocoder-pitch (-V flag) preserves duration${RESET}"
+
+    # 0.2s source — needs to be long enough for phase vocoder windows to
+    # settle. At 22050 Hz output, expect ~4410 samples ±10%.
+    sox -n -r 44100 -b 16 -c 1 "${tmpdir}/t12_in.wav" synth 0.2 sine 1000
+
+    _reset_opts
+    SAMPLE_RATE=22050
+    VOCODER_SEMITONES=12
+    convert_file "${tmpdir}/t12_in.wav" "${tmpdir}/t12_vocoder.iff"
+
+    iff=$(_read_iff "${tmpdir}/t12_vocoder.iff")
+    [[ $(_iff_field "$iff" form_tag) == "FORM" ]] && _pass "Vocoder-pitched +12 → valid FORM" || _fail "Vocoder-pitched output corrupt"
+
+    # With `pitch` (phase vocoder), duration is PRESERVED. 0.2s × 22050 = 4410
+    # samples ±10% for vocoder window alignment slop.
+    body_size=$(_iff_field "$iff" body_size)
+    if (( body_size >= 3969 && body_size <= 4851 )); then
+        _pass "Duration preserved by vocoder (got $body_size samples, expected ~4410)"
+    else
+        _fail "Duration unexpected after vocoder shift ($body_size, expected ~4410)"
+    fi
+
+    # Compare against -P 12 on the same source: with speed, duration halves.
+    _reset_opts
+    SAMPLE_RATE=22050
+    PREPITCH_SEMITONES=12
+    convert_file "${tmpdir}/t12_in.wav" "${tmpdir}/t12_speed.iff"
+
+    local speed_body vocoder_body
+    speed_body=$(_iff_field "$(_read_iff "${tmpdir}/t12_speed.iff")" body_size)
+    vocoder_body=$(_iff_field "$(_read_iff "${tmpdir}/t12_vocoder.iff")" body_size)
+
+    # Vocoder body should be ~2x speed body (vocoder preserves, speed halves).
+    local ratio_pct
+    ratio_pct=$(( vocoder_body * 100 / speed_body ))
+    if (( ratio_pct >= 180 && ratio_pct <= 220 )); then
+        _pass "Vocoder duration ≈ 2× speed duration (ratio: ${ratio_pct}%, expected ~200%)"
+    else
+        _fail "Vocoder/speed ratio unexpected (${ratio_pct}%, expected ~200%)"
+    fi
+
+    echo ""
+
+    # ── Test 13: -P and -V mutual exclusion ────────────────────────────────
+
+    echo -e "${BOLD}Test 13: -P and -V mutual exclusion${RESET}"
+
+    # Direct CLI invocation — should fail with exit code != 0.
+    # Use a subshell to isolate from the test's `set -e` behavior.
+    if (bash "$0" -P 12 -V 7 /dev/null 2>/dev/null); then
+        _fail "-P and -V together did not error out"
+    else
+        _pass "-P and -V together correctly rejected"
+    fi
 
     echo ""
 
