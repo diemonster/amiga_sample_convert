@@ -60,7 +60,12 @@
 #              Mutually exclusive with -P.
 #   -p         Preview: print file info and conversion plan, don't convert
 #   -b         Batch mode: treat all non-option args as input files
-#   -o DIR     Output directory for batch mode (default: ./amiga_samples)
+#              (auto-enabled when a directory is passed, or when more than
+#              two input paths are given)
+#   -o DIR     Output directory for batch mode. If omitted, each converted
+#              sample is written to the SAME directory as its source file.
+#              Input paths may be individual files, directories (all audio
+#              files inside are processed non-recursively), or shell globs.
 #   --self-test Run smoke tests to verify the conversion pipeline
 #   -h         Show this help
 #
@@ -88,7 +93,11 @@ PREPITCH_SEMITONES=0
 VOCODER_SEMITONES=0
 PREVIEW=false
 BATCH=false
-OUT_DIR="./amiga_samples"
+OUT_DIR=""
+OUT_DIR_EXPLICIT=false
+
+# Audio extensions we'll pick up when a directory is passed as input.
+AUDIO_EXTS=(wav wave aif aiff aifc flac mp3 ogg oga opus m4a mp4 caf au snd w64 voc)
 
 # ─── colors (if terminal) ──────────────────────────────────────────────────
 
@@ -420,7 +429,7 @@ main() {
             -V) VOCODER_SEMITONES="$2"; shift 2 ;;
             -p) PREVIEW=true; shift ;;
             -b) BATCH=true; shift ;;
-            -o) OUT_DIR="$2"; shift 2 ;;
+            -o) OUT_DIR="$2"; OUT_DIR_EXPLICIT=true; shift 2 ;;
             -h|--help) usage ;;
             --self-test) run_self_test; exit $? ;;
             -*) die "Unknown option: $1" ;;
@@ -430,6 +439,49 @@ main() {
 
     if (( ${#inputs[@]} == 0 )); then
         die "No input file(s) specified. Use -h for help."
+    fi
+
+    # Expand any directory arguments into their audio-file contents.
+    # Non-recursive: only files directly inside the directory are picked up.
+    # If a directory is passed, batch mode is implicitly enabled.
+    local expanded=()
+    local saw_directory=false
+    local arg
+    for arg in "${inputs[@]}"; do
+        if [[ -d "$arg" ]]; then
+            saw_directory=true
+            local found=()
+            local ext f
+            # Collect matches across all known extensions (case-insensitive).
+            shopt -s nullglob nocaseglob
+            for ext in "${AUDIO_EXTS[@]}"; do
+                for f in "$arg"/*."$ext"; do
+                    [[ -f "$f" ]] && found+=("$f")
+                done
+            done
+            shopt -u nullglob nocaseglob
+            if (( ${#found[@]} == 0 )); then
+                warn "No audio files found in directory: $arg"
+                continue
+            fi
+            # Stable ordering
+            IFS=$'\n' found=($(printf '%s\n' "${found[@]}" | sort))
+            unset IFS
+            expanded+=("${found[@]}")
+        else
+            expanded+=("$arg")
+        fi
+    done
+    inputs=("${expanded[@]}")
+
+    if (( ${#inputs[@]} == 0 )); then
+        die "No input files to process."
+    fi
+
+    # Auto-enable batch mode when a directory was expanded or when we
+    # have more than two inputs total.
+    if ${saw_directory} || (( ${#inputs[@]} > 2 )); then
+        BATCH=true
     fi
 
     # validate sample rate range
@@ -481,7 +533,8 @@ main() {
 
         # derive output name
         if [[ -z "$explicit_output" ]]; then
-            local base
+            local base src_dir
+            src_dir=$(dirname "$input")
             base=$(basename "$input")
             base="${base%.*}"
             # Amiga filenames: keep it short, no spaces
@@ -495,7 +548,9 @@ main() {
                 base="${base}_V${VOCODER_SEMITONES}"
                 base=$(echo "$base" | cut -c1-24)
             fi
-            explicit_output="${base}.iff"
+            # Write alongside the source by default so converted samples
+            # live next to the originals.
+            explicit_output="${src_dir}/${base}.iff"
         fi
 
         convert_file "$input" "$explicit_output"
@@ -503,8 +558,12 @@ main() {
     fi
 
     # batch mode
-    mkdir -p "$OUT_DIR"
-    info "Batch converting ${#inputs[@]} files → ${OUT_DIR}/"
+    if ${OUT_DIR_EXPLICIT}; then
+        mkdir -p "$OUT_DIR"
+        info "Batch converting ${#inputs[@]} files → ${OUT_DIR}/"
+    else
+        info "Batch converting ${#inputs[@]} files (output alongside each source)"
+    fi
     echo ""
 
     local count=0
@@ -520,6 +579,15 @@ main() {
             continue
         fi
 
+        # Pick output directory: explicit -o wins; otherwise write next to
+        # the source file so a processed directory stays self-contained.
+        local out_dir
+        if ${OUT_DIR_EXPLICIT}; then
+            out_dir="$OUT_DIR"
+        else
+            out_dir=$(dirname "$input")
+        fi
+
         local base
         base=$(basename "$input")
         base="${base%.*}"
@@ -531,13 +599,13 @@ main() {
             base="${base}_V${VOCODER_SEMITONES}"
             base=$(echo "$base" | cut -c1-24)
         fi
-        local output="${OUT_DIR}/${base}.iff"
+        local output="${out_dir}/${base}.iff"
 
         # avoid overwrites in batch
         if [[ -f "$output" ]]; then
             local i=2
-            while [[ -f "${OUT_DIR}/${base}_${i}.iff" ]]; do ((i++)); done
-            output="${OUT_DIR}/${base}_${i}.iff"
+            while [[ -f "${out_dir}/${base}_${i}.iff" ]]; do ((i++)); done
+            output="${out_dir}/${base}_${i}.iff"
         fi
 
         convert_file "$input" "$output"
@@ -546,7 +614,11 @@ main() {
     done
 
     if ! ${PREVIEW}; then
-        echo -e "${GREEN}${BOLD}Converted ${count} file(s) to ${OUT_DIR}/${RESET}"
+        if ${OUT_DIR_EXPLICIT}; then
+            echo -e "${GREEN}${BOLD}Converted ${count} file(s) to ${OUT_DIR}/${RESET}"
+        else
+            echo -e "${GREEN}${BOLD}Converted ${count} file(s) alongside their sources${RESET}"
+        fi
     fi
 }
 
@@ -1078,6 +1150,98 @@ PYEOF
         _fail "-P and -V together did not error out"
     else
         _pass "-P and -V together correctly rejected"
+    fi
+
+    echo ""
+
+    # ── Test 14: Directory input globbing & per-source output ──────────────
+
+    echo -e "${BOLD}Test 14: Directory input globbing${RESET}"
+
+    local gdir="${tmpdir}/globtest"
+    mkdir -p "$gdir"
+
+    # Create a mix of audio files with varied extensions/casing, plus a
+    # non-audio file that must be ignored.
+    sox -n -r 22050 -b 16 -c 1 "${gdir}/one.wav"  synth 0.02 sine 440
+    sox -n -r 22050 -b 16 -c 1 "${gdir}/two.WAV"  synth 0.02 sine 440
+    sox -n -r 22050 -b 16 -c 1 "${gdir}/three.aiff" synth 0.02 sine 440
+    sox -n -r 22050 -b 16 -c 1 "${gdir}/four.flac" synth 0.02 sine 440
+    echo "not audio" > "${gdir}/readme.txt"
+
+    # Invoke the script via its own CLI so we exercise the real argument
+    # parsing path (directory expansion + auto-batch + default output dir).
+    bash "$0" -r 16726 -D "$gdir" > "${tmpdir}/globtest.log" 2>&1 || true
+
+    # Each of the four audio files should produce an .iff alongside itself.
+    local expected_outs=(
+        "${gdir}/one.iff"
+        "${gdir}/two.iff"
+        "${gdir}/three.iff"
+        "${gdir}/four.iff"
+    )
+    local missing=0
+    for f in "${expected_outs[@]}"; do
+        [[ -f "$f" ]] || ((missing++))
+    done
+    if (( missing == 0 )); then
+        _pass "Directory expanded → 4 audio files converted next to sources"
+    else
+        _fail "Directory expansion missing $missing/4 outputs (see ${tmpdir}/globtest.log)"
+    fi
+
+    # The non-audio file must not spawn an .iff
+    if [[ ! -f "${gdir}/readme.iff" ]]; then
+        _pass "Non-audio files ignored during directory expansion"
+    else
+        _fail "readme.txt was incorrectly processed"
+    fi
+
+    # No rogue default output directory should be created when -o is omitted
+    if [[ ! -d "${gdir}/amiga_samples" && ! -d "./amiga_samples" ]]; then
+        _pass "No implicit ./amiga_samples directory created"
+    else
+        _fail "Implicit amiga_samples directory appeared unexpectedly"
+    fi
+
+    # Validate one of the produced files is a real IFF 8SVX
+    if [[ -f "${gdir}/one.iff" ]]; then
+        iff=$(_read_iff "${gdir}/one.iff")
+        [[ $(_iff_field "$iff" form_tag) == "FORM" && $(_iff_field "$iff" type_tag) == "8SVX" ]] \
+            && _pass "Directory-expanded output is valid IFF 8SVX" \
+            || _fail "Directory-expanded output not a valid IFF"
+    fi
+
+    # Case-insensitive matching worked (two.WAV → two.iff)
+    if [[ -f "${gdir}/two.iff" ]]; then
+        _pass "Case-insensitive extension matching (WAV)"
+    else
+        _fail "Uppercase .WAV extension was not matched"
+    fi
+
+    # Explicit -o DIR still overrides per-source output placement
+    local odir="${tmpdir}/globtest_out"
+    bash "$0" -r 16726 -D -o "$odir" "$gdir" > "${tmpdir}/globtest_o.log" 2>&1 || true
+    local o_count
+    o_count=$(find "$odir" -maxdepth 1 -name '*.iff' 2>/dev/null | wc -l | tr -d ' ')
+    if [[ "$o_count" == "4" ]]; then
+        _pass "Explicit -o DIR collects all outputs in one directory"
+    else
+        _fail "Explicit -o DIR produced $o_count/4 outputs (see ${tmpdir}/globtest_o.log)"
+    fi
+
+    # Empty directory should warn but not crash
+    local empty_dir="${tmpdir}/empty"
+    mkdir -p "$empty_dir"
+    if bash "$0" -r 16726 -D "$empty_dir" > "${tmpdir}/empty.log" 2>&1; then
+        _fail "Empty directory should have caused a non-zero exit"
+    else
+        if grep -q "No input files to process" "${tmpdir}/empty.log" \
+           || grep -q "No audio files found" "${tmpdir}/empty.log"; then
+            _pass "Empty directory handled gracefully with warning"
+        else
+            _fail "Empty directory failed but without expected message"
+        fi
     fi
 
     echo ""

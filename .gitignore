@@ -1,0 +1,34 @@
+# Audio files — keep sample material out of the repo
+*.wav
+*.wave
+*.aif
+*.aiff
+*.aifc
+*.iff
+*.8svx
+*.flac
+*.mp3
+*.ogg
+*.oga
+*.opus
+*.m4a
+*.mp4
+*.caf
+*.au
+*.snd
+*.w64
+*.voc
+*.asd
+
+# Case variants (macOS/Windows can produce uppercase extensions)
+*.WAV
+*.AIFF
+*.IFF
+*.MP3
+*.FLAC
+
+# Default batch-mode output directory
+amiga_samples/
+
+# macOS
+.DS_Store
