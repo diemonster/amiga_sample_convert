@@ -9,16 +9,35 @@
 #   ./amiga_sample_convert.sh [options] input_file [output_file]
 #
 # Options:
-#   -r RATE    Target sample rate in Hz (default: 22050)
+#   -r RATE    Target sample rate in Hz (default: 28604; auto-scaled when
+#              -P/-V is used — see below).
 #              Common Amiga rates:
 #                8363  - ProTracker C-3 standard (low quality, saves memory)
 #                11025 - Telephony standard
 #                16726 - 2x ProTracker C-3 (conservative, smaller files)
-#                22050 - CD/2 (high quality, good default)
-#                27928 - 4x ProTracker C-3 (near max safe rate for PAL)
+#                22050 - CD/2 (decent quality, smaller files)
+#                27928 - 4x ProTracker C-3
+#                28604 - PAL Paula max at C-3 (clock 3546895 / period 124)
+#                          → Nyquist ~14.3 kHz, the brightest you can get
+#                          on real PAL hardware without OctaMED clamping
+#                          Paula's period. **(default)**
+#                28867 - NTSC Paula max at C-3 (slightly higher; on PAL
+#                          it'll play a hair flat at C-3).
+#                65535 - 8SVX header maximum (UWORD field). Useful when
+#                          combined with -P for pitch-down playback in
+#                          OctaMED — Paula has tons of period headroom
+#                          below C-3 and benefits from the extra bandwidth
+#                          and aliasing material. Will clamp on direct C-3
+#                          playback.
 #              Note: Paula is fixed 8-bit; rate is the primary quality lever.
-#              MiSTer Minimig can be configured with 2MB chip RAM, so higher
-#              rates are usually worth it for any percussive or tonal material.
+#              The stored 8SVX rate is metadata — OctaMED uses it to compute
+#              Paula's period for whatever note you trigger. Going above
+#              28604 on PAL means C-3 hits Paula's minimum period and
+#              OctaMED detunes slightly, but lower notes are fine.
+#              Auto-scale: when -P or -V pitch-up is used, the stored rate
+#              is scaled up by the same factor (capped at 65535) so Paula
+#              sees full bandwidth at the played-back note. Pass an
+#              explicit -r to opt out of the auto-scale.
 #   -n         Normalize audio to 0 dBFS before conversion
 #   -g GAIN    Apply gain in dB before conversion (e.g., -3, +6)
 #   -f FREQ    Manual anti-alias LPF cutoff in Hz (default: auto Nyquist-based)
@@ -82,7 +101,8 @@ set -euo pipefail
 
 # ─── defaults ───────────────────────────────────────────────────────────────
 
-SAMPLE_RATE=22050
+SAMPLE_RATE=28604
+SAMPLE_RATE_EXPLICIT=false
 NORMALIZE=false
 GAIN=""
 LPF_CUTOFF=""
@@ -135,6 +155,31 @@ semitones_to_playback_hint() {
     local octave=$((target_abs / 12))
     local note_idx=$((target_abs % 12))
     echo "${notes[$note_idx]}${octave}"
+}
+
+# Build an Amiga-friendly output basename:
+#   - replace spaces with underscores
+#   - append _P{N} or _V{N} tag for pitch-shifted output (so you don't
+#     confuse a crunchy aliased pre-pitched sample with a clean one)
+#   - truncate to 24 chars TOTAL, but reserve room for the tag FIRST so
+#     the tag is never sliced off. Previously we truncated the stem to
+#     24 then appended the tag and re-truncated, which silently dropped
+#     the tag for any source name >= 24 chars.
+amiga_basename() {
+    local raw="$1"
+    local max=24
+    local tag=""
+    if (( PREPITCH_SEMITONES != 0 )); then
+        tag="_P${PREPITCH_SEMITONES}"
+    elif (( VOCODER_SEMITONES != 0 )); then
+        tag="_V${VOCODER_SEMITONES}"
+    fi
+    local stem
+    stem=$(echo "$raw" | tr ' ' '_')
+    local stem_room=$(( max - ${#tag} ))
+    (( stem_room < 1 )) && stem_room=1
+    stem=$(echo "$stem" | cut -c1-${stem_room})
+    echo "${stem}${tag}"
 }
 
 usage() {
@@ -222,8 +267,12 @@ PYEOF
 print_info() {
     local file="$1"
     echo -e "${BOLD}Source:${RESET} $(basename "$file")"
+    # Use `|` as sed delimiter so the ANSI escape sequences in DIM/RESET
+    # (which contain `[` but never `|`) don't collide with it. The original
+    # form `sed "s/^/  ${DIM}/${RESET}/"` produced four `/` fields which
+    # sed parses as malformed flags — broken in both TTY and non-TTY runs.
     soxi "$file" 2>/dev/null | grep -E '(Channels|Sample Rate|Precision|Duration|Bit Rate|Sample Encoding)' | \
-        sed "s/^/  ${DIM}/${RESET}/"
+        sed "s|^|  ${DIM}|; s|\$|${RESET}|"
     local src_rate src_bits src_chans
     src_rate=$(soxi -r "$file" 2>/dev/null)
     src_bits=$(soxi -b "$file" 2>/dev/null)
@@ -405,6 +454,14 @@ convert_file() {
 
     info "  → ${output} (${out_kb} KB, ${duration}s, ${body_size} samples)"
     echo -e "  ${GREEN}✓ Done${RESET}"
+
+    # Optional machine-readable manifest of output paths, one per line.
+    # Wrapper scripts (e.g. SMB-upload Quick Actions) set this env var so
+    # they can reliably consume the produced .iff files without parsing
+    # human-formatted log lines.
+    if [[ -n "${AMIGA_OUTPUT_MANIFEST:-}" ]]; then
+        echo "$output" >> "$AMIGA_OUTPUT_MANIFEST"
+    fi
 }
 
 # ─── main ───────────────────────────────────────────────────────────────────
@@ -417,7 +474,7 @@ main() {
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            -r) SAMPLE_RATE="$2"; shift 2 ;;
+            -r) SAMPLE_RATE="$2"; SAMPLE_RATE_EXPLICIT=true; shift 2 ;;
             -n) NORMALIZE=true; shift ;;
             -g) GAIN="$2"; shift 2 ;;
             -f) LPF_CUTOFF="$2"; shift 2 ;;
@@ -444,6 +501,28 @@ main() {
     # Expand any directory arguments into their audio-file contents.
     # Non-recursive: only files directly inside the directory are picked up.
     # If a directory is passed, batch mode is implicitly enabled.
+    #
+    # Explicit file args are also filtered against AUDIO_EXTS so that
+    # right-click / Quick Action workflows on mixed selections (e.g. a
+    # folder containing .wav alongside .txt or .DS_Store) silently skip
+    # non-audio files instead of erroring out at sox. Files with no
+    # extension at all are passed through — could be a raw dump the user
+    # wants sox to identify.
+    is_audio_ext() {
+        local fname="$1"
+        local ext="${fname##*.}"
+        # No extension (or filename starts with `.`): pass through.
+        [[ "$fname" == "$ext" ]] && return 0
+        [[ "$fname" == .* && "$fname" != *.* ]] && return 0
+        local lower_ext
+        lower_ext=$(echo "$ext" | tr '[:upper:]' '[:lower:]')
+        local known
+        for known in "${AUDIO_EXTS[@]}"; do
+            [[ "$lower_ext" == "$known" ]] && return 0
+        done
+        return 1
+    }
+
     local expanded=()
     local saw_directory=false
     local arg
@@ -469,13 +548,21 @@ main() {
             unset IFS
             expanded+=("${found[@]}")
         else
+            if [[ -f "$arg" ]] && ! is_audio_ext "$arg"; then
+                info "Skipping non-audio file: $(basename "$arg")"
+                continue
+            fi
             expanded+=("$arg")
         fi
     done
-    inputs=("${expanded[@]}")
+    inputs=(${expanded[@]+"${expanded[@]}"})
 
     if (( ${#inputs[@]} == 0 )); then
-        die "No input files to process."
+        # If we filtered out non-audio files and ended up empty, that's a
+        # benign no-op (e.g. right-click on a folder with no audio). Exit
+        # cleanly so Quick Actions don't throw a scary error dialog.
+        warn "No audio files to process."
+        exit 0
     fi
 
     # Auto-enable batch mode when a directory was expanded or when we
@@ -484,9 +571,52 @@ main() {
         BATCH=true
     fi
 
-    # validate sample rate range
-    if (( SAMPLE_RATE < 2000 || SAMPLE_RATE > 28867 )); then
-        warn "Sample rate ${SAMPLE_RATE} Hz is outside typical Amiga range (2000-28867 Hz)"
+    # Auto-scale stored sample rate for pitch-shift workflows.
+    #
+    # Why: the 8SVX rate is metadata that anchors C-3 to a Paula period.
+    # When you pitch UP with -P/-V and play SEMI semitones LOWER in
+    # OctaMED to restore pitch, Paula's actual playback period is multiplied
+    # by 2^(SEMI/12), so it has tons of headroom below the period-124
+    # hardware floor. Storing at the bare 28604 default wastes that
+    # headroom — Paula ends up running at 28604 / 2^(SEMI/12) Hz with a
+    # correspondingly low Nyquist and noticeably less aliased grit.
+    #
+    # Solution: when -P/-V is active and the user did not pin a rate with
+    # -r, scale the stored rate up by 2^(SEMI/12) so Paula's playback rate
+    # AT THE PLAYED-BACK NOTE is the same as what 28604 gives you at C-3.
+    # That preserves bandwidth on the way in AND gives Paula more sample
+    # bytes per period, which is where the crunchy aliasing comes from.
+    #
+    # The 8SVX header field for samplesPerSec is a UWORD, so 65535 Hz is
+    # the format ceiling — we cap there. Negative -P would scale DOWN, but
+    # that's a weird workflow already (you'd play HIGHER in OctaMED) and
+    # not what we're optimizing for; we only auto-scale up.
+    if ! ${SAMPLE_RATE_EXPLICIT}; then
+        local pitch_semis=0
+        if (( PREPITCH_SEMITONES > 0 )); then
+            pitch_semis=$PREPITCH_SEMITONES
+        elif (( VOCODER_SEMITONES > 0 )); then
+            pitch_semis=$VOCODER_SEMITONES
+        fi
+        if (( pitch_semis > 0 )); then
+            local scaled
+            scaled=$(python3 -c "print(min(65535, round($SAMPLE_RATE * 2 ** ($pitch_semis / 12.0))))")
+            if (( scaled != SAMPLE_RATE )); then
+                info "Pitch-shift active: auto-scaling stored rate ${SAMPLE_RATE} → ${scaled} Hz so Paula sees full bandwidth at the played-back note (override with -r)."
+                SAMPLE_RATE=$scaled
+            fi
+        fi
+    fi
+
+    # validate sample rate range. 65535 is the 8SVX UWORD ceiling;
+    # below 2000 is sub-telephony and almost certainly a typo.
+    if (( SAMPLE_RATE < 2000 || SAMPLE_RATE > 65535 )); then
+        warn "Sample rate ${SAMPLE_RATE} Hz is outside the 8SVX range (2000-65535 Hz)"
+    elif (( SAMPLE_RATE > 28867 )); then
+        # Above PAL/NTSC C-3 ceiling: legitimate for pitch-shift workflows
+        # or 8-channel mixing mode, but C-3 playback will clamp on real
+        # hardware. Note rather than warn — this is often intentional.
+        info "Stored rate ${SAMPLE_RATE} Hz is above Paula's C-3 ceiling (28867 Hz). Fine for -P/-V workflows or 8-channel mixing mode; on direct C-3 playback OctaMED will clamp the period."
     fi
 
     # validate pre-pitch value — sanity-check extreme values
@@ -534,22 +664,19 @@ main() {
         # derive output name
         if [[ -z "$explicit_output" ]]; then
             local base src_dir
-            src_dir=$(dirname "$input")
             base=$(basename "$input")
             base="${base%.*}"
-            # Amiga filenames: keep it short, no spaces
-            base=$(echo "$base" | tr ' ' '_' | cut -c1-24)
-            # Tag aliased/vocoder output so you don't confuse it with clean version
-            if (( PREPITCH_SEMITONES != 0 )); then
-                base="${base}_P${PREPITCH_SEMITONES}"
-                # Re-truncate in case the tag pushed it over 24 chars
-                base=$(echo "$base" | cut -c1-24)
-            elif (( VOCODER_SEMITONES != 0 )); then
-                base="${base}_V${VOCODER_SEMITONES}"
-                base=$(echo "$base" | cut -c1-24)
+            base=$(amiga_basename "$base")
+            if ${OUT_DIR_EXPLICIT}; then
+                # -o was given on a single-file invocation: honor it
+                # exactly the same way batch mode does.
+                mkdir -p "$OUT_DIR"
+                src_dir="$OUT_DIR"
+            else
+                # Write alongside the source by default so converted
+                # samples live next to the originals.
+                src_dir=$(dirname "$input")
             fi
-            # Write alongside the source by default so converted samples
-            # live next to the originals.
             explicit_output="${src_dir}/${base}.iff"
         fi
 
@@ -591,14 +718,7 @@ main() {
         local base
         base=$(basename "$input")
         base="${base%.*}"
-        base=$(echo "$base" | tr ' ' '_' | cut -c1-24)
-        if (( PREPITCH_SEMITONES != 0 )); then
-            base="${base}_P${PREPITCH_SEMITONES}"
-            base=$(echo "$base" | cut -c1-24)
-        elif (( VOCODER_SEMITONES != 0 )); then
-            base="${base}_V${VOCODER_SEMITONES}"
-            base=$(echo "$base" | cut -c1-24)
-        fi
+        base=$(amiga_basename "$base")
         local output="${out_dir}/${base}.iff"
 
         # avoid overwrites in batch
@@ -1230,18 +1350,18 @@ PYEOF
         _fail "Explicit -o DIR produced $o_count/4 outputs (see ${tmpdir}/globtest_o.log)"
     fi
 
-    # Empty directory should warn but not crash
+    # Empty directory should warn but exit cleanly (zero) so right-click
+    # Quick Actions on empty folders don't throw scary error dialogs.
     local empty_dir="${tmpdir}/empty"
     mkdir -p "$empty_dir"
     if bash "$0" -r 16726 -D "$empty_dir" > "${tmpdir}/empty.log" 2>&1; then
-        _fail "Empty directory should have caused a non-zero exit"
-    else
-        if grep -q "No input files to process" "${tmpdir}/empty.log" \
-           || grep -q "No audio files found" "${tmpdir}/empty.log"; then
+        if grep -q "No audio files" "${tmpdir}/empty.log"; then
             _pass "Empty directory handled gracefully with warning"
         else
-            _fail "Empty directory failed but without expected message"
+            _fail "Empty directory exited 0 but without expected warning message"
         fi
+    else
+        _fail "Empty directory should exit 0 (clean no-op), not error"
     fi
 
     echo ""

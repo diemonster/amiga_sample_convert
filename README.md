@@ -16,9 +16,11 @@ Note: this has been tested on MacOS. It should work on Linux, etc but may need s
 ```bash
 chmod +x amiga_sample_convert.sh
 
-# Convert a kick drum sample (defaults to 22050 Hz, dithered 8-bit)
+# Convert a kick drum sample (defaults to 28604 Hz, dithered 8-bit)
 ./amiga_sample_convert.sh kick.wav
 ```
+
+For a Finder right-click → **Quick Actions → Convert to Amiga 8SVX** workflow, see [macos/README.md](macos/README.md).
 
 ## Usage
 
@@ -30,35 +32,38 @@ In single-file mode, the output filename is optional — it defaults to the inpu
 
 ## Options
 
-| Flag          | Description                                                    |
-| ------------- | -------------------------------------------------------------- |
-| `-r RATE`     | Target sample rate in Hz (default: 22050)                      |
-| `-n`          | Normalize audio to 0 dBFS before conversion                    |
-| `-g GAIN`     | Apply gain in dB (e.g., `-3`, `+6`)                            |
-| `-f FREQ`     | Manual anti-alias LPF cutoff in Hz                             |
-| `-l`          | Apply A500-style low-pass at 4.9 kHz (always-on output filter) |
-| `-t`          | Trim silence from start and end (-48 dB threshold)             |
-| `-d`          | TPDF dither (default: on)                                      |
-| `-D`          | Disable dither — truncate to 8-bit                             |
-| `-P SEMI`     | Pre-pitch UP by SEMI semitones via raw resample (aliasing)     |
-| `-V SEMI`     | Vocoder-pitch shift by SEMI semitones (duration-preserving)    |
-| `-p`          | Preview: show file info and conversion plan, don't convert     |
-| `-b`          | Batch mode: treat all positional args as input files           |
-| `-o DIR`      | Output directory for batch mode (default: `./amiga_samples`)   |
-| `--self-test` | Run built-in smoke tests                                       |
-| `-h`          | Show help                                                      |
+| Flag          | Description                                                       |
+| ------------- | ----------------------------------------------------------------- |
+| `-r RATE`     | Target sample rate in Hz (default: 28604, auto-scaled with -P/-V) |
+| `-n`          | Normalize audio to 0 dBFS before conversion                       |
+| `-g GAIN`     | Apply gain in dB (e.g., `-3`, `+6`)                               |
+| `-f FREQ`     | Manual anti-alias LPF cutoff in Hz                                |
+| `-l`          | Apply A500-style low-pass at 4.9 kHz (always-on output filter)    |
+| `-t`          | Trim silence from start and end (-48 dB threshold)                |
+| `-d`          | TPDF dither (default: on)                                         |
+| `-D`          | Disable dither — truncate to 8-bit                                |
+| `-P SEMI`     | Pre-pitch UP by SEMI semitones via raw resample (aliasing)        |
+| `-V SEMI`     | Vocoder-pitch shift by SEMI semitones (duration-preserving)       |
+| `-p`          | Preview: show file info and conversion plan, don't convert        |
+| `-b`          | Batch mode: treat all positional args as input files              |
+| `-o DIR`      | Output directory (applies to single-file and batch modes)         |
+| `--self-test` | Run built-in smoke tests                                          |
+| `-h`          | Show help                                                         |
 
 ## Sample rates
 
-| Rate     | Notes                                                           |
-| -------- | --------------------------------------------------------------- |
-| 8363 Hz  | ProTracker C-3 standard. Low quality, saves chip RAM.           |
-| 11025 Hz | Telephony standard.                                             |
-| 16726 Hz | 2× ProTracker C-3. Conservative, smaller files.                 |
-| 22050 Hz | CD÷2. High quality, good general-purpose default. **(default)** |
-| 27928 Hz | 4× ProTracker C-3. Near the max safe rate for PAL Amiga.        |
+| Rate     | Notes                                                                                                         |
+| -------- | ------------------------------------------------------------------------------------------------------------- |
+| 8363 Hz  | ProTracker C-3 standard. Low quality, saves chip RAM.                                                         |
+| 11025 Hz | Telephony standard.                                                                                           |
+| 16726 Hz | 2× ProTracker C-3. Conservative, smaller files.                                                               |
+| 22050 Hz | CD÷2. Decent quality, smaller files.                                                                          |
+| 27928 Hz | 4× ProTracker C-3.                                                                                            |
+| 28604 Hz | PAL Paula max at C-3 (Nyquist ~14.3 kHz). **(default)**                                                       |
+| 28867 Hz | NTSC Paula max at C-3. On PAL, plays a hair flat at C-3.                                                      |
+| 65535 Hz | 8SVX header maximum (UWORD field). Useful with `-P` for pitch-down playback. C-3 will clamp on real hardware. |
 
-Paula is fixed 8-bit, so rate is the primary quality lever. The default of 22050 Hz gives clean, bright playback and is usually worth it — MiSTer Minimig cores can be configured with 2 MB of chip RAM, which makes higher rates practical for anything percussive or tonal. If you know the note you'll trigger the sample at most often, you can tune the rate to match (16726 Hz is 2× ProTracker C-3, which gives clean C-3 playback on PAL).
+Paula is fixed 8-bit, so the stored sample rate is the primary quality lever. The default of 28604 Hz is the highest rate that plays cleanly at C-3 on PAL Paula (clock 3,546,895 ÷ minimum period 124) — Nyquist around 14.3 kHz, which keeps cymbal shimmer and other top-end content intact. MiSTer Minimig cores can be configured with 2 MB of chip RAM, so the bigger files aren't usually a problem. Drop to 22050 or 16726 Hz to save chip RAM on a stock Amiga, or to deliberately darken the sound. If you know the note you'll trigger the sample at most often, you can tune the rate to match (16726 Hz is 2× ProTracker C-3, which gives clean C-3 playback on PAL).
 
 ## Examples
 
@@ -66,7 +71,7 @@ Paula is fixed 8-bit, so rate is the primary quality lever. The default of 22050
 
 ```bash
 ./amiga_sample_convert.sh kick.wav
-# → kick.iff (22050 Hz, 8-bit signed mono, TPDF dithered)
+# → kick.iff (28604 Hz, 8-bit signed mono, TPDF dithered)
 ```
 
 **Normalize and convert at ProTracker rate:**
@@ -137,6 +142,8 @@ Paula is fixed 8-bit, so rate is the primary quality lever. The default of 22050
 
 **Pre-pitch for aliasing (`-P SEMI`):** Uses sox's `speed` effect to raw-resample the sample upward (tape-speed-up style) before writing the IFF. Playing the pitched-up sample back at a correspondingly lower note in OctaMED cancels the pitch shift — but Paula's nearest-neighbor playback math generates aliasing on the way back down. This is the classic crunchy jungle/breakcore Amiga sound. `+12` halves the sample's duration and shifts it up one octave; play at C-2 to restore the original pitch (instead of C-3). Typical useful range is `7` to `24`. The anti-alias LPF is automatically bypassed when `-P` is used, since aliasing is the point. Extreme values (> 5 octaves) warn but proceed.
 
+**Auto-scaled stored rate with `-P`/`-V`:** When you pitch up and play back lower, Paula's actual playback period is multiplied by `2^(SEMI/12)`, leaving plenty of headroom below its period-124 hardware floor. To take advantage of that, the stored 8SVX rate is automatically scaled up by the same factor (capped at the format ceiling of 65535 Hz) so Paula sees full bandwidth at the played-back note rather than at C-3. Pass `-r RATE` explicitly to opt out. Examples with the default base of 28604: `-P 12` → stored at 57208 Hz; `-P 24` → capped at 65535 Hz.
+
 **Vocoder pitch (`-V SEMI`):** Uses sox's `pitch` effect (phase vocoder), which shifts pitch while preserving duration. The tradeoff is cyclic window-crossfade artifacts that sound warbly and glitchy — which is itself a distinctive IDM/breakcore/vaporwave texture. Play the sample at its original note in OctaMED; no pitch compensation needed. Mutually exclusive with `-P`, and also bypasses the anti-alias LPF.
 
 ## Output format
@@ -181,3 +188,5 @@ Runs a suite of checks covering IFF structure, sample rate accuracy, normalizati
 ## Transfer to Amiga
 
 Once converted, copy your `.iff` files to your Amiga via whatever method you use — Compact Flash card, serial transfer, Aminet, etc. The files are ready to load directly into OctaMED's sample slots.
+
+For a one-click "convert + upload to a network share" workflow on macOS (auto-mounts an SMB target like a MiSTer's `sdcard` and copies the `.iff` straight there), see [macos/README.md](macos/README.md#smb-upload-workflow).

@@ -1,0 +1,25 @@
+# Sample config for amiga_sample_convert wrappers.
+#
+# Copy this to ~/.config/amiga_sample_convert/config and edit the values.
+# It's sourced by the upload wrappers via `source`, so it's plain zsh.
+#
+#   mkdir -p ~/.config/amiga_sample_convert
+#   cp /path/to/repo/macos/config.sample ~/.config/amiga_sample_convert/config
+#
+# All keys are optional — anything you don't set falls back to the wrapper's
+# built-in defaults.
+
+# Where to upload converted .iff files. Full smb:// URL with optional
+# user@ and any subpath inside the share. The wrapper auto-mounts and
+# auto-creates the target subdirectory.
+#
+# Default: smb://mister/sdcard/games/Amiga/shared/samples
+#
+# AMIGA_SMB_URL="smb://mister/sdcard/games/Amiga/shared/samples"
+
+# Extra flags to pass to amiga_sample_convert.sh on every run. Useful if
+# you want all your uploaded samples to share a particular treatment
+# (e.g. always normalize, always trim silence). The -P24 sibling wrapper
+# overrides this with -P 24 regardless of what you set here.
+#
+# AMIGA_CONVERT_FLAGS="-n -t"
