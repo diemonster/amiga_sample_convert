@@ -114,6 +114,28 @@ The first time the wrapper runs against a new SMB host, macOS will pop a GUI dia
 
 If the host is unreachable (e.g. MiSTer powered off, you're not on the LAN), the wrapper logs an error and exits 1 — it never tries to retry forever.
 
+### Result notification (optional but recommended)
+
+The upload wrapper prints a single human-readable status line to stdout on every exit path — success, partial failure, mount error, etc. Pair it with Shortcuts.app's built-in **Show Notification** action and every right-click upload gets a banner confirming what happened.
+
+In each upload Shortcut, after the **Run Shell Script** action:
+
+1. Add a **Show Notification** action below it.
+2. Click the body field (the `Hello World` placeholder next to the bell icon), delete the placeholder, and insert the **Shell Script Result** variable (drag from the variables strip, or click the existing Magic Variables suggestion).
+3. When the variable popover appears, set **Type: Text** and **Get: Text**. Don't use the **Attachment** field — that expects a file, not the script's stdout.
+4. Optional: set **Title** to `Amiga` (or whatever) and toggle **Play Sound**.
+5. Save (⌘S).
+
+Example banners you'll see:
+
+- `Amiga upload complete: Donaldson_break.iff → sdcard.`
+- `Amiga upload complete: 5 files → sdcard.`
+- `Amiga upload partial: 4 ok, 1 failed → sdcard.`
+- `Amiga upload failed: could not mount smb://mister/sdcard.`
+- `Amiga upload: no audio files produced — nothing to upload.`
+
+This approach uses Shortcuts.app's own notification permission rather than `osascript display notification` (which is attributed to Script Editor and frequently silently denied), so it works reliably without per-app permission grants.
+
 ## Folder Action setup (fully automatic, optional)
 
 If you want a "drop in to convert" workflow:

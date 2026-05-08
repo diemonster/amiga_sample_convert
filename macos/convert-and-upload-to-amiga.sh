@@ -66,6 +66,53 @@ copy_file() {
     } < "$src" > "$dst"
 }
 
+# ─── user-visible result summary ────────────────────────────────────────────
+#
+# When this script runs from a Quick Action / Shortcut, stdout is invisible
+# to the user — they only see the Shortcuts running indicator briefly
+# appear and disappear, with no signal as to whether the conversion +
+# upload actually succeeded.
+#
+# We tried osascript `display notification` first, but those notifications
+# are attributed to Script Editor and only surface if the user has granted
+# Script Editor notification permission in System Settings — which Apple
+# now hides behind a one-shot registration step that's easy to miss. The
+# more reliable path is to print a one-line summary on stdout and let
+# Shortcuts.app's own **Show Notification** action display it (Shortcuts
+# already has notification permission by default).
+#
+# Mechanism:
+#   - everything the script logs goes to ~/Library/Logs/... as before,
+#     via a block-level `>>` redirect at the bottom of this file
+#   - we save the original stdout on fd 3 BEFORE that redirect kicks in
+#   - `set_summary` writes a single line into a tmp file
+#   - an EXIT trap copies that line to fd 3 right before the script ends,
+#     so the Shortcut's "Shell Script Result" variable contains exactly
+#     one human-readable line regardless of which code path we exited via
+#
+# To consume in Shortcuts.app, add a **Show Notification** action right
+# after **Run Shell Script** with body set to **Shell Script Result**.
+
+# Save original stdout for later summary emission. After the main block's
+# `>> "$log_file"` redirect, fd 1 points at the log; fd 3 still points at
+# the Shortcut's stdout pipe.
+exec 3>&1
+
+summary_file=$(/usr/bin/mktemp -t amiga_summary)
+# Default summary covers the "script aborted before reaching anything
+# specific" case (e.g. SIGTERM, set -e from an unexpected failure).
+echo "Amiga upload: failed (see ~/Library/Logs/amiga_sample_convert.log)" > "$summary_file"
+
+set_summary() {
+    echo "$1" > "$summary_file"
+}
+
+emit_summary() {
+    /bin/cat "$summary_file" >&3 2>/dev/null || true
+    /bin/rm -f "$summary_file" 2>/dev/null || true
+}
+trap emit_summary EXIT
+
 # ─── environment ────────────────────────────────────────────────────────────
 
 # GUI-launched shells don't inherit interactive PATH; Homebrew tools live in
@@ -99,6 +146,7 @@ if [[ ! -x "$converter" ]]; then
         echo "Error: converter not found or not executable: $converter"
     } >> "$log_file" 2>&1
     echo "Error: converter not found or not executable: $converter" >&2
+    set_summary "Amiga upload failed: converter script not found."
     exit 1
 fi
 
@@ -185,6 +233,7 @@ ensure_mounted() {
     echo "smb url: $AMIGA_SMB_URL"
 
     if ! parse_smb_url "$AMIGA_SMB_URL"; then
+        set_summary "Amiga upload failed: bad SMB URL ($AMIGA_SMB_URL)."
         exit 1
     fi
     echo "mount url: $SMB_MOUNT_URL"
@@ -194,6 +243,7 @@ ensure_mounted() {
     if ! ensure_mounted; then
         echo "Error: failed to mount $SMB_MOUNT_URL"
         echo "(check the URL, your network, and macOS Keychain credentials)"
+        set_summary "Amiga upload failed: could not mount ${SMB_MOUNT_URL}."
         exit 1
     fi
 
@@ -202,6 +252,7 @@ ensure_mounted() {
     if [[ ! -d "$SMB_TARGET_DIR" ]]; then
         mkdir -p "$SMB_TARGET_DIR" || {
             echo "Error: cannot create $SMB_TARGET_DIR (permission denied?)"
+            set_summary "Amiga upload failed: cannot create ${SMB_TARGET_DIR}."
             exit 1
         }
     fi
@@ -221,13 +272,17 @@ ensure_mounted() {
     # to the source. Use the non-upload Quick Action for that.
     tmp_outdir=$(/usr/bin/mktemp -d -t amiga_outdir)
     manifest=$(/usr/bin/mktemp -t amiga_manifest)
-    trap 'rm -rf "$tmp_outdir" "$manifest"' EXIT
+    # Chain cleanup with the existing summary-emit trap so we don't lose
+    # either behavior. emit_summary must still run on exit so the
+    # Shortcut sees the result line on stdout.
+    trap 'rm -rf "$tmp_outdir" "$manifest"; emit_summary' EXIT
 
     AMIGA_OUTPUT_MANIFEST="$manifest" \
         "$converter" -o "$tmp_outdir" ${=AMIGA_CONVERT_FLAGS:-} "$@"
 
     if [[ ! -s "$manifest" ]]; then
         echo "(no .iff files produced; nothing to upload)"
+        set_summary "Amiga upload: no audio files produced — nothing to upload."
         exit 0
     fi
 
@@ -255,9 +310,20 @@ ensure_mounted() {
     done < "$manifest"
 
     echo "Uploaded ${upload_count} file(s) to ${SMB_TARGET_DIR}/"
+    # Build a short summary for Shortcuts. For a single file we name it;
+    # for multiple we summarise the count and destination share.
+    target_label="${SMB_MOUNT_POINT##*/Volumes/}"
+    [[ -z "$target_label" ]] && target_label="$SMB_TARGET_DIR"
     if (( upload_failed > 0 )); then
         echo "Warning: ${upload_failed} upload(s) failed."
+        set_summary "Amiga upload partial: ${upload_count} ok, ${upload_failed} failed → ${target_label}."
         exit 1
+    fi
+    if (( upload_count == 1 )); then
+        single_name=$(/usr/bin/head -n1 "$manifest")
+        set_summary "Amiga upload complete: ${single_name:t} → ${target_label}."
+    else
+        set_summary "Amiga upload complete: ${upload_count} files → ${target_label}."
     fi
     exit 0
 
