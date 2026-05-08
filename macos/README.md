@@ -10,9 +10,11 @@ The wrappers in this directory fix that once, in scripts you can keep under vers
 
 | Wrapper                                                                  | What it does                                                                                   | Local `.iff` left behind?     |
 | ------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------- | ----------------------------- |
-| [convert-to-amiga.sh](convert-to-amiga.sh)                               | Clean conversion, default settings.                                                            | Yes, next to the source file. |
+| [convert-to-amiga.sh](convert-to-amiga.sh)                               | Clean conversion, default settings (anchors original pitch to C-3 in OctaMED 4ch).             | Yes, next to the source file. |
+| [convert-to-amiga-A3.sh](convert-to-amiga-A3.sh)                         | Anchors original pitch to A-3 (~27867 Hz) for breaks/loops with HF energy. Play at A-3.        | Yes, next to the source file. |
 | [convert-to-amiga-P24.sh](convert-to-amiga-P24.sh)                       | Pitches up 24 semitones for the crunchy aliased Amiga jungle workflow. Play at C-1 in OctaMED. | Yes, next to the source file. |
 | [convert-and-upload-to-amiga.sh](convert-and-upload-to-amiga.sh)         | Converts, auto-mounts a configurable SMB share, uploads the `.iff`.                            | **No** — only on the share.   |
+| [convert-and-upload-to-amiga-A3.sh](convert-and-upload-to-amiga-A3.sh)   | A-3 anchor variant of the upload wrapper. Play at A-3 in OctaMED.                              | **No.**                       |
 | [convert-and-upload-to-amiga-P24.sh](convert-and-upload-to-amiga-P24.sh) | `-P 24` variant of the upload wrapper.                                                         | **No.**                       |
 
 All four append their output to the same log file so you can watch progress in real time:
@@ -24,8 +26,11 @@ tail -f ~/Library/Logs/amiga_sample_convert.log
 Make them executable once after cloning:
 
 ```bash
-chmod +x macos/convert-to-amiga.sh macos/convert-to-amiga-P24.sh \
-         macos/convert-and-upload-to-amiga.sh macos/convert-and-upload-to-amiga-P24.sh
+chmod +x macos/convert-to-amiga.sh macos/convert-to-amiga-A3.sh \
+         macos/convert-to-amiga-P24.sh \
+         macos/convert-and-upload-to-amiga.sh \
+         macos/convert-and-upload-to-amiga-A3.sh \
+         macos/convert-and-upload-to-amiga-P24.sh
 ```
 
 ## Shortcuts.app setup (recommended, macOS 12+)
@@ -50,11 +55,13 @@ chmod +x macos/convert-to-amiga.sh macos/convert-to-amiga-P24.sh \
 5. Rename the shortcut (this is the label that appears in the right-click menu), e.g. **Convert to Amiga 8SVX**.
 6. Save (⌘S).
 
-Repeat with the other wrappers for whichever variants you want available in the right-click menu (`-P 24`, upload, upload+`-P 24`). Naming suggestions:
+Repeat with the other wrappers for whichever variants you want available in the right-click menu (`-N A-3`, `-P 24`, upload, upload+`-N A-3`, upload+`-P 24`). Naming suggestions:
 
 - **Convert to Amiga 8SVX**
+- **Convert to Amiga 8SVX (A-3 / breaks)**
 - **Convert to Amiga 8SVX (-P 24)**
 - **Convert & upload to Amiga**
+- **Convert & upload to Amiga (A-3 / breaks)**
 - **Convert & upload to Amiga (-P 24)**
 
 In Finder: select audio files, folders, or any mix → right-click → **Quick Actions → ...**. Multi-select works because the wrapper forwards all `"$@"` to the converter, which auto-enables batch mode for >2 inputs.
@@ -123,17 +130,18 @@ Anything dropped into the watched folder is processed automatically. Useful as a
 
 ## Troubleshooting
 
-| Symptom                                                              | Fix                                                                                                                                                                                                            |
-| -------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| "sox not found" in the log                                           | The wrapper's hardcoded `PATH` doesn't match where Homebrew put sox. Edit [convert-to-amiga.sh](convert-to-amiga.sh) and prepend the correct directory, or run `which sox` in your terminal and add that.      |
-| Quick Action menu entry never appears                                | macOS only shows Quick Actions whose declared input type matches the selection. Make sure the Shortcut is set to receive **Files & Folders** (or **Any**).                                                     |
-| Shortcut fails with "couldn't convert from Media to Folder"          | The Run Shell Script action's **Input** dropdown is coercing input to a specific type. Set it to take the action's input directly without coercion, and **Pass input: as arguments**.                          |
-| Converted file appears with no `_P24` suffix                         | The variant wrapper wasn't used. The converter reserves room for the tag before truncating to 24 chars, so a missing suffix means the wrong wrapper is wired up.                                               |
-| Right-click runs but nothing happens                                 | Check `tail -n 50 ~/Library/Logs/amiga_sample_convert.log` for errors. If the log is empty or missing, the wrapper never ran — make sure **Run as Administrator** is **unchecked** in the Shell Script action. |
-| "Operation not permitted" copying from `~/Desktop` (upload wrapper)  | You're on an old version of the upload wrapper that wrote `.iff` next to the source. Pull latest — the current wrapper writes to a tmp dir and copies via shell builtins to bypass macOS TCC.                  |
-| Upload wrapper exits 1 even though the log shows a successful upload | Old version of the wrapper had an exit-code leak. Pull latest.                                                                                                                                                 |
-| First mount prompts for credentials every time                       | Tick **Remember this password in my keychain** in the dialog.                                                                                                                                                  |
-| `mount volume` fails silently                                        | Check the URL by mounting manually first: Finder → ⌘K → paste your `AMIGA_SMB_URL`. Once that succeeds and is keychain-saved, the wrapper will reuse it.                                                       |
+| Symptom                                                              | Fix                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| -------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| "sox not found" in the log                                           | The wrapper's hardcoded `PATH` doesn't match where Homebrew put sox. Edit [convert-to-amiga.sh](convert-to-amiga.sh) and prepend the correct directory, or run `which sox` in your terminal and add that.                                                                                                                                                                                                                                                                                                  |
+| Quick Action menu entry never appears                                | macOS only shows Quick Actions whose declared input type matches the selection. Make sure the Shortcut is set to receive **Files & Folders** (or **Any**).                                                                                                                                                                                                                                                                                                                                                 |
+| Shortcut fails with "couldn't convert from Media to Folder"          | The Run Shell Script action's **Input** dropdown is coercing input to a specific type. Set it to take the action's input directly without coercion, and **Pass input: as arguments**.                                                                                                                                                                                                                                                                                                                      |
+| Converted file appears with no `_P24` suffix                         | The variant wrapper wasn't used. The converter reserves room for the tag before truncating to 24 chars, so a missing suffix means the wrong wrapper is wired up.                                                                                                                                                                                                                                                                                                                                           |
+| Right-click runs but nothing happens                                 | Check `tail -n 50 ~/Library/Logs/amiga_sample_convert.log` for errors. If the log is empty or missing, the wrapper never ran — make sure **Run as Administrator** is **unchecked** in the Shell Script action.                                                                                                                                                                                                                                                                                             |
+| Shortcut "fails" but produces no log entry at all                    | The wrapper writes a `── timestamp ──` startup line as its very first action, so a complete absence means macOS never reached the script. Check: Shortcut body is the **absolute path** to the right wrapper (the non-P24 wrapper has no `-P24` in the filename), **Pass input: as arguments** is on, **Shell** is `/bin/zsh`, **Run as Administrator** is off, and the script is executable (`ls -l macos/*.sh`). The fastest fix is to duplicate the working P24 Shortcut and just swap the script path. |
+| "Operation not permitted" copying from `~/Desktop` (upload wrapper)  | You're on an old version of the upload wrapper that wrote `.iff` next to the source. Pull latest — the current wrapper writes to a tmp dir and copies via shell builtins to bypass macOS TCC.                                                                                                                                                                                                                                                                                                              |
+| Upload wrapper exits 1 even though the log shows a successful upload | Old version of the wrapper had an exit-code leak. Pull latest.                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| First mount prompts for credentials every time                       | Tick **Remember this password in my keychain** in the dialog.                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `mount volume` fails silently                                        | Check the URL by mounting manually first: Finder → ⌘K → paste your `AMIGA_SMB_URL`. Once that succeeds and is keychain-saved, the wrapper will reuse it.                                                                                                                                                                                                                                                                                                                                                   |
 
 ## Uninstall
 

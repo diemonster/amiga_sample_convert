@@ -16,7 +16,9 @@ Note: this has been tested on MacOS. It should work on Linux, etc but may need s
 ```bash
 chmod +x amiga_sample_convert.sh
 
-# Convert a kick drum sample (defaults to 28604 Hz, dithered 8-bit)
+# Convert a kick drum sample (defaults to 16574 Hz — Paula's PAL playback
+# rate at C-3 in 4-channel mode, so triggering at C-3 in OctaMED gives
+# original pitch with no aliasing)
 ./amiga_sample_convert.sh kick.wav
 ```
 
@@ -32,38 +34,52 @@ In single-file mode, the output filename is optional — it defaults to the inpu
 
 ## Options
 
-| Flag          | Description                                                       |
-| ------------- | ----------------------------------------------------------------- |
-| `-r RATE`     | Target sample rate in Hz (default: 28604, auto-scaled with -P/-V) |
-| `-n`          | Normalize audio to 0 dBFS before conversion                       |
-| `-g GAIN`     | Apply gain in dB (e.g., `-3`, `+6`)                               |
-| `-f FREQ`     | Manual anti-alias LPF cutoff in Hz                                |
-| `-l`          | Apply A500-style low-pass at 4.9 kHz (always-on output filter)    |
-| `-t`          | Trim silence from start and end (-48 dB threshold)                |
-| `-d`          | TPDF dither (default: on)                                         |
-| `-D`          | Disable dither — truncate to 8-bit                                |
-| `-P SEMI`     | Pre-pitch UP by SEMI semitones via raw resample (aliasing)        |
-| `-V SEMI`     | Vocoder-pitch shift by SEMI semitones (duration-preserving)       |
-| `-p`          | Preview: show file info and conversion plan, don't convert        |
-| `-b`          | Batch mode: treat all positional args as input files              |
-| `-o DIR`      | Output directory (applies to single-file and batch modes)         |
-| `--self-test` | Run built-in smoke tests                                          |
-| `-h`          | Show help                                                         |
+| Flag          | Description                                                             |
+| ------------- | ----------------------------------------------------------------------- |
+| `-r RATE`     | Target sample rate in Hz (default: 16574 — Paula at C-3, PAL 4-channel) |
+| `-N NOTE`     | Pick rate so original pitch plays at NOTE in OctaMED 4-channel mode     |
+| `-n`          | Normalize audio to 0 dBFS before conversion                             |
+| `-g GAIN`     | Apply gain in dB (e.g., `-3`, `+6`)                                     |
+| `-f FREQ`     | Manual anti-alias LPF cutoff in Hz                                      |
+| `-l`          | Apply A500-style low-pass at 4.9 kHz (always-on output filter)          |
+| `-t`          | Trim silence from start and end (-48 dB threshold)                      |
+| `-d`          | TPDF dither (default: on)                                               |
+| `-D`          | Disable dither — truncate to 8-bit                                      |
+| `-P SEMI`     | Pre-pitch UP by SEMI semitones via raw resample (aliasing)              |
+| `-V SEMI`     | Vocoder-pitch shift by SEMI semitones (duration-preserving)             |
+| `-p`          | Preview: show file info and conversion plan, don't convert              |
+| `-b`          | Batch mode: treat all positional args as input files                    |
+| `-o DIR`      | Output directory (applies to single-file and batch modes)               |
+| `--self-test` | Run built-in smoke tests                                                |
+| `-h`          | Show help                                                               |
 
 ## Sample rates
 
-| Rate     | Notes                                                                                                         |
-| -------- | ------------------------------------------------------------------------------------------------------------- |
-| 8363 Hz  | ProTracker C-3 standard. Low quality, saves chip RAM.                                                         |
-| 11025 Hz | Telephony standard.                                                                                           |
-| 16726 Hz | 2× ProTracker C-3. Conservative, smaller files.                                                               |
-| 22050 Hz | CD÷2. Decent quality, smaller files.                                                                          |
-| 27928 Hz | 4× ProTracker C-3.                                                                                            |
-| 28604 Hz | PAL Paula max at C-3 (Nyquist ~14.3 kHz). **(default)**                                                       |
-| 28867 Hz | NTSC Paula max at C-3. On PAL, plays a hair flat at C-3.                                                      |
-| 65535 Hz | 8SVX header maximum (UWORD field). Useful with `-P` for pitch-down playback. C-3 will clamp on real hardware. |
+Paula in 4-channel mode is fixed 8-bit and DMA-fetches sample bytes at `clock / period`, where period is determined entirely by the note you trigger — the stored 8SVX rate is metadata, not a playback target. So the trick is to render the source at the rate Paula will fetch it at when you play the note you intend to trigger.
 
-Paula is fixed 8-bit, so the stored sample rate is the primary quality lever. The default of 28604 Hz is the highest rate that plays cleanly at C-3 on PAL Paula (clock 3,546,895 ÷ minimum period 124) — Nyquist around 14.3 kHz, which keeps cymbal shimmer and other top-end content intact. MiSTer Minimig cores can be configured with 2 MB of chip RAM, so the bigger files aren't usually a problem. Drop to 22050 or 16726 Hz to save chip RAM on a stock Amiga, or to deliberately darken the sound. If you know the note you'll trigger the sample at most often, you can tune the rate to match (16726 Hz is 2× ProTracker C-3, which gives clean C-3 playback on PAL).
+| Note (PAL) | Period  | Paula playback rate | Use as conversion rate when…                                   |
+| ---------- | ------- | ------------------- | -------------------------------------------------------------- |
+| C-1        | 856     | 4,144 Hz            | Sub-bass anchor; play melodically up from C-1.                 |
+| C-2        | 428     | 8,287 Hz            | Octave-down anchor; saves chip RAM, plenty of headroom up.     |
+| **C-3**    | **214** | **16,574 Hz**       | **PT-natural note. Default. Best general-purpose anchor.**     |
+| A-3        | ~127    | ~27,867 Hz          | Anchor near brightness ceiling — don't trigger below A-3.      |
+| B-3 / C-4  | ~124    | ~28,604 Hz          | Hardware ceiling. Need source content meant to play that high. |
+
+Effective Nyquist is half the playback rate, so default 16574 Hz gives ~8.3 kHz Nyquist at C-3 — cymbal air above that gets filtered. If your sample lives in a higher register, anchor higher: `-N A-3` stores ~27867 Hz so a sample triggered at A-3 reproduces full ~14 kHz Nyquist (just don't trigger below A-3 or you'll under-sample and alias).
+
+Use `-N` to anchor original pitch to a different OctaMED note: `-N C-2` for low-register playing, `-N A-3` to push toward Paula's ceiling, etc. The `-r` flag accepts an explicit Hz value if you'd rather think in rates than notes.
+
+### Why 4-channel mode is the highest-fidelity option
+
+OctaMED's `CH.MODE: HQ` setting on the PLAY panel only matters in 5/6/7/8-channel **Split Channel Mode**, where Paula's 4 hardware voices each carry two software-mixed software voices. The trade-offs there:
+
+- 5–8ch with HQ off: software mixer runs at ~15.8 kHz, runs on stock 68000.
+- 5–8ch with HQ on: mixer runs at ~28.9 kHz, needs 68020+ accelerator.
+- Switching into split mode prompts “Halve samples?” (default yes), which downsamples loaded instruments to ~7-bit so two voices can sum into one channel without clipping. Hold **Shift** while clicking `LOAD: INSTR` to skip halving — only safe for instruments on the un-split hardware channels.
+- 4-channel mode has no software mixer; samples go straight to Paula DMA at full 8-bit. **This is the highest-fidelity path.**
+- Also turn `FILTER` off on the PLAY panel — that's Paula's ~3 kHz LED low-pass and it kills the top end on samples that would otherwise reach the hardware ceiling.
+
+If you need >28.6 kHz playback rates or >4 voices without halving, the upgrade path is OctaMED Soundstudio's Mix mode (free mixing frequency up to ~56 kHz, pseudo-14-bit Paula output) — not a different setting in V4.
 
 ## Examples
 
@@ -71,7 +87,14 @@ Paula is fixed 8-bit, so the stored sample rate is the primary quality lever. Th
 
 ```bash
 ./amiga_sample_convert.sh kick.wav
-# → kick.iff (28604 Hz, 8-bit signed mono, TPDF dithered)
+# → kick.iff (16574 Hz — trigger at C-3 in OctaMED 4-channel mode for original pitch)
+```
+
+**Anchor original pitch to a different note (e.g. brighter samples meant to play high):**
+
+```bash
+./amiga_sample_convert.sh -N A-3 hat.wav
+# → hat.iff (~27867 Hz, ~14 kHz Nyquist; play at A-3, don't trigger below)
 ```
 
 **Normalize and convert at ProTracker rate:**

@@ -9,35 +9,45 @@
 #   ./amiga_sample_convert.sh [options] input_file [output_file]
 #
 # Options:
-#   -r RATE    Target sample rate in Hz (default: 28604; auto-scaled when
+#   -r RATE    Target sample rate in Hz (default: 16574 — Paula's playback
+#              rate at C-3 in PAL 4-channel mode, so a sample triggered at
+#              C-3 in OctaMED reproduces original pitch. Auto-scaled when
 #              -P/-V is used — see below).
-#              Common Amiga rates:
-#                8363  - ProTracker C-3 standard (low quality, saves memory)
-#                11025 - Telephony standard
-#                16726 - 2x ProTracker C-3 (conservative, smaller files)
-#                22050 - CD/2 (decent quality, smaller files)
-#                27928 - 4x ProTracker C-3
-#                28604 - PAL Paula max at C-3 (clock 3546895 / period 124)
-#                          → Nyquist ~14.3 kHz, the brightest you can get
-#                          on real PAL hardware without OctaMED clamping
-#                          Paula's period. **(default)**
-#                28867 - NTSC Paula max at C-3 (slightly higher; on PAL
-#                          it'll play a hair flat at C-3).
-#                65535 - 8SVX header maximum (UWORD field). Useful when
-#                          combined with -P for pitch-down playback in
-#                          OctaMED — Paula has tons of period headroom
-#                          below C-3 and benefits from the extra bandwidth
-#                          and aliasing material. Will clamp on direct C-3
-#                          playback.
-#              Note: Paula is fixed 8-bit; rate is the primary quality lever.
-#              The stored 8SVX rate is metadata — OctaMED uses it to compute
-#              Paula's period for whatever note you trigger. Going above
-#              28604 on PAL means C-3 hits Paula's minimum period and
-#              OctaMED detunes slightly, but lower notes are fine.
+#              In 4-channel mode there is no software mixer: Paula DMA-fetches
+#              sample bytes at clock/period, so the *effective* playback rate
+#              is determined entirely by which note you trigger, NOT by the
+#              stored 8SVX rate. The script uses the stored rate to decide
+#              what rate to render sox output at, so the prepared file
+#              matches Paula's playback rate at the target note.
+#              Common rates (PAL clock 3,546,895 / period):
+#                4144  - C-1  (period 856).  Useful sub-bass anchor.
+#                8287  - C-2  (period 428).  Octave-down anchor.
+#                16574 - C-3  (period 214).  PT-table 'natural' note. **(default)**
+#                28604 - ~B-3/C-4 ceiling (period ~124, Paula DMA min).
+#                          Bandwidth ceiling on real hardware. Only reached
+#                          when triggering ~2 octaves above C-3.
+#                28867 - NTSC equivalent of 28604.
+#                65535 - 8SVX header maximum (UWORD field). Useful with -P
+#                          for pitch-down playback and aliasing material.
+#              Avoid playing samples *below* the note their rate was
+#              prepared at — you're then under-sampling Paula's DMA stream
+#              and HF content folds back as aliasing. Pick a rate matching
+#              the lowest note you'll actually trigger.
 #              Auto-scale: when -P or -V pitch-up is used, the stored rate
 #              is scaled up by the same factor (capped at 65535) so Paula
 #              sees full bandwidth at the played-back note. Pass an
-#              explicit -r to opt out of the auto-scale.
+#              explicit -r or -N to opt out of the auto-scale.
+#   -N NOTE    Target playback note: pick the conversion rate so the
+#              sample plays at original pitch when triggered at NOTE in
+#              OctaMED's 4-channel mode (PAL clock). NOTE format is
+#              OctaMED-style: C-3, C#3, A-2, B-1, etc.
+#              Implies an explicit rate, so disables -P/-V auto-scaling.
+#              Examples:
+#                -N C-3   → 16574 Hz (default; PT-natural note)
+#                -N C-2   →  8287 Hz (anchor an octave lower; play
+#                              melodically up from C-2 without aliasing)
+#                -N A-3   → ~27867 Hz (anchor near top of brightness;
+#                              C-3 would alias — don't play below A-3)
 #   -n         Normalize audio to 0 dBFS before conversion
 #   -g GAIN    Apply gain in dB before conversion (e.g., -3, +6)
 #   -f FREQ    Manual anti-alias LPF cutoff in Hz (default: auto Nyquist-based)
@@ -101,7 +111,16 @@ set -euo pipefail
 
 # ─── defaults ───────────────────────────────────────────────────────────────
 
-SAMPLE_RATE=28604
+# Default: PAL Paula's playback rate at C-3 in 4-channel mode
+# (clock 3,546,895 / period 214 = 16574.27 Hz). Optimized for the
+# highest-fidelity OctaMED workflow: 4-channel mode, FILTER off, full
+# 8-bit samples (no halving). Sample triggered at C-3 plays at original
+# pitch with no aliasing. NTSC users can pass -r 16726 or set
+# AMIGA_TV_MODE=ntsc.
+SAMPLE_RATE=16574
+if [[ "${AMIGA_TV_MODE:-}" == "ntsc" ]]; then
+    SAMPLE_RATE=16726
+fi
 SAMPLE_RATE_EXPLICIT=false
 NORMALIZE=false
 GAIN=""
@@ -138,6 +157,47 @@ fi
 die()  { echo -e "${RED}Error:${RESET} $*" >&2; exit 1; }
 warn() { echo -e "${YELLOW}Warning:${RESET} $*" >&2; }
 info() { echo -e "${CYAN}→${RESET} $*"; }
+
+# Map an OctaMED note name (C-3, C#3, D-3, ..., A-2, B-1) to the Paula
+# playback rate at that note in standard 4-channel ProTracker mode (PAL).
+#
+# Uses PT period table arithmetic: C-3 = period 214, each semitone is
+# 2^(1/12), each octave is 2x. PAL Paula clock = 3546895 Hz.
+#
+# Returns the rate on stdout, or returns nonzero (exit 1) on a parse error.
+# Result is clamped to the 8SVX UWORD range (2000..65535) at the edges.
+note_to_paula_rate() {
+    local note="$1"
+    python3 - "$note" << 'PYEOF' || exit 1
+import sys, re
+note = sys.argv[1].strip().upper()
+# Accepted: "C-3", "C#3", "DB3", "D-3", with letter, optional accidental, octave digit.
+m = re.fullmatch(r"([A-G])([#B-]?)(-?)(\d)", note)
+if not m:
+    sys.stderr.write(f"unparseable note: {note}\n")
+    sys.exit(1)
+letter, acc, _, octave = m.groups()
+octave = int(octave)
+# Semitone offsets within an octave from C
+base = {"C":0,"D":2,"E":4,"F":5,"G":7,"A":9,"B":11}[letter]
+if acc == "#":
+    base += 1
+elif acc == "B":
+    base -= 1
+# absolute semitone index (C-0 = 0)
+idx = octave * 12 + base
+# C-3 reference index = 36
+delta = idx - 36
+# PT C-3 PAL Paula playback rate = 3546895 / 214
+import math
+rate = (3546895.0 / 214.0) * (2.0 ** (delta / 12.0))
+rate = int(round(rate))
+if rate < 2000 or rate > 65535:
+    sys.stderr.write(f"note {note} maps to {rate} Hz, outside 8SVX range (2000..65535)\n")
+    sys.exit(1)
+print(rate)
+PYEOF
+}
 
 # Convert semitones to a human-readable target note relative to C-3
 semitones_to_playback_hint() {
@@ -482,6 +542,13 @@ main() {
             -t) TRIM_SILENCE=true; shift ;;
             -d) DITHER=true; shift ;;
             -D) DITHER=false; shift ;;
+            -N) local _rate
+                if ! _rate=$(note_to_paula_rate "$2"); then
+                    die "Invalid note for -N: $2 (use OctaMED format like C-3, A#2, B-1)"
+                fi
+                SAMPLE_RATE="$_rate"
+                SAMPLE_RATE_EXPLICIT=true
+                shift 2 ;;
             -P) PREPITCH_SEMITONES="$2"; shift 2 ;;
             -V) VOCODER_SEMITONES="$2"; shift 2 ;;
             -p) PREVIEW=true; shift ;;

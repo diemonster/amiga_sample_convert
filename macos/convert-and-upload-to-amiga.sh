@@ -75,14 +75,32 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
 script_dir="${0:A:h}"
 converter="${script_dir}/../amiga_sample_convert.sh"
 
-if [[ ! -x "$converter" ]]; then
-    echo "Error: converter not found or not executable: $converter" >&2
-    exit 1
-fi
-
 log_dir="${HOME}/Library/Logs"
 log_file="${log_dir}/amiga_sample_convert.log"
 mkdir -p "$log_dir"
+
+# Eager startup line: written BEFORE any potentially-failing setup so that
+# even if the wrapper aborts early (missing converter, bad config, sandbox
+# permission issue, etc.), we still leave a trace in the log. Without
+# this, an early failure looks indistinguishable from "the Shortcut never
+# invoked the wrapper at all."
+{
+    echo ""
+    echo "── $(date '+%Y-%m-%d %H:%M:%S') ──"
+    echo "mode: convert + SMB upload (startup)"
+    echo "wrapper: ${0}"
+    echo "user: $(id -un) ($(id -u))"
+    echo "extra flags: ${AMIGA_CONVERT_FLAGS:-(none)}"
+    echo "args: $*"
+} >> "$log_file" 2>&1
+
+if [[ ! -x "$converter" ]]; then
+    {
+        echo "Error: converter not found or not executable: $converter"
+    } >> "$log_file" 2>&1
+    echo "Error: converter not found or not executable: $converter" >&2
+    exit 1
+fi
 
 # ─── SMB URL parser ─────────────────────────────────────────────────────────
 #
@@ -162,13 +180,9 @@ ensure_mounted() {
 # ─── run ────────────────────────────────────────────────────────────────────
 
 {
-    echo ""
-    echo "── $(date '+%Y-%m-%d %H:%M:%S') ──"
-    echo "mode: convert + SMB upload"
-    echo "user: $(id -un) ($(id -u))"
+    # (startup banner already written above before any potentially-failing
+    # setup; this block adds the runtime detail and per-step progress)
     echo "smb url: $AMIGA_SMB_URL"
-    echo "extra flags: ${AMIGA_CONVERT_FLAGS:-(none)}"
-    echo "args: $*"
 
     if ! parse_smb_url "$AMIGA_SMB_URL"; then
         exit 1
